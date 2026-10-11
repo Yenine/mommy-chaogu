@@ -245,7 +245,8 @@ class FallbackAdapter:
         return result if result is not None else []
 
     def get_ticks(self, code: str, limit: int | None = None) -> list[Tick]:
-        return cast("list[Tick]", self._try_call("get_ticks", code, limit=limit))
+        result = cast("list[Tick] | None", self._try_call("get_ticks", code, limit=limit))
+        return result if result is not None else []
 
     def get_today_money_flow(self, code: str) -> list[MoneyFlow]:
         result = cast("list[MoneyFlow] | None", self._try_call("get_today_money_flow", code))
@@ -259,7 +260,8 @@ class FallbackAdapter:
         return result if result is not None else []
 
     def get_belonging_boards(self, code: str) -> list[Board]:
-        return cast("list[Board]", self._try_call("get_belonging_boards", code))
+        result = cast("list[Board] | None", self._try_call("get_belonging_boards", code))
+        return result if result is not None else []
 
     def health_check(self) -> bool:
         """任何一个 adapter 健康就算健康。"""
