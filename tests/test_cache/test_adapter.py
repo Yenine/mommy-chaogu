@@ -768,3 +768,155 @@ def test_get_quotes_unknown_code_returns_empty(cached: CachedMarketDataAdapter) 
     """底层不认识的 code → 结果不含它。"""
     result = cached.get_quotes(["999999"])
     assert len(result) == 0
+
+
+# ---------- 资金流交易日维度 / 失败保旧 / --force（Q1 收口） ----------
+
+
+def _flow(code: str, main: int = 100_000_000) -> MoneyFlow:
+    return MoneyFlow(
+        code=code,
+        name=f"名称{code}",
+        timestamp=datetime.now(UTC),
+        main_net=Money.from_yuan(main),
+        small_net=Money.from_yuan(0),
+        medium_net=Money.from_yuan(0),
+        large_net=Money.from_yuan(0),
+        super_large_net=Money.from_yuan(0),
+    )
+
+
+def _flow_cfg() -> CacheConfig:
+    return CacheConfig(today_money_flow_fetch_interval_seconds=60)
+
+
+def test_today_money_flow_failure_keeps_old_and_marks_stale(
+    store: CacheStore, mock_adp: MockAdapter
+) -> None:
+    """拉新失败（抛异常）+ 有旧缓存 → 返回旧数据标 stale_cache，绝不丢数据。"""
+    cached = CachedMarketDataAdapter(mock_adp, store, config=_flow_cfg())
+    mock_adp.get_today_money_flow = lambda code: [_flow(code)]  # type: ignore[method-assign]
+    assert len(cached.get_today_money_flow("600519")) == 1
+    before = store.get_today_money_flow("600519")
+
+    def _boom(code: str) -> list[MoneyFlow]:
+        raise ConnectionError("blocked")
+
+    mock_adp.get_today_money_flow = _boom  # type: ignore[method-assign]
+    cached._last_fetch_attempt["today_flow:600519"] = datetime.now(UTC) - timedelta(seconds=120)
+    result = cached.get_today_money_flow("600519")
+
+    assert len(result) == 1
+    assert cached.last_source == "stale_cache"
+    assert store.get_today_money_flow("600519") == before  # 旧数据未被覆盖
+
+
+def test_today_money_flow_cross_day_marks_trade_date(
+    store: CacheStore, mock_adp: MockAdapter
+) -> None:
+    """跨交易日命中 → stale 并标注该数据所属交易日（不得冒充今日）。"""
+    cached = CachedMarketDataAdapter(mock_adp, store, config=_flow_cfg())
+    mock_adp.get_today_money_flow = lambda code: [_flow(code)]  # type: ignore[method-assign]
+    cached.get_today_money_flow("600519")
+    store.set_today_money_flow(
+        "600519", store.get_today_money_flow("600519") or [], trade_date="2020-01-02"
+    )
+
+    def _boom(code: str) -> list[MoneyFlow]:
+        raise ConnectionError("blocked")
+
+    mock_adp.get_today_money_flow = _boom  # type: ignore[method-assign]
+    result = cached.get_today_money_flow("600519")
+
+    assert len(result) == 1
+    assert cached.last_source == "stale_cache"
+    assert cached.last_source_trade_date == "2020-01-02"
+    assert "2020-01-02" in cached.format_source_label()
+
+
+def test_today_money_flow_empty_without_cache_is_confirmed_empty(
+    store: CacheStore, mock_adp: MockAdapter
+) -> None:
+    """无旧缓存 + 源正常返回空列表 → 记为「确认无数据」（network_empty），与失败可区分。"""
+    cached = CachedMarketDataAdapter(mock_adp, store, config=_flow_cfg())
+    mock_adp.get_today_money_flow = lambda code: []  # type: ignore[method-assign]
+    assert cached.get_today_money_flow("600519") == []
+    assert cached.last_source == "network_empty"
+    entry = store.get_today_money_flow_entry("600519")
+    assert entry is not None and entry.flows == []
+
+
+def test_today_money_flow_empty_with_old_cache_prefers_stale(
+    store: CacheStore, mock_adp: MockAdapter
+) -> None:
+    """无法区分「空」与「全链失败」时：有旧缓存一律保旧标 stale（钉死口径三）。"""
+    cached = CachedMarketDataAdapter(mock_adp, store, config=_flow_cfg())
+    mock_adp.get_today_money_flow = lambda code: [_flow(code)]  # type: ignore[method-assign]
+    cached.get_today_money_flow("600519")
+    before = store.get_today_money_flow("600519")
+
+    mock_adp.get_today_money_flow = lambda code: []  # type: ignore[method-assign]
+    cached._last_fetch_attempt["today_flow:600519"] = datetime.now(UTC) - timedelta(seconds=120)
+    result = cached.get_today_money_flow("600519")
+
+    assert len(result) == 1
+    assert cached.last_source == "stale_cache"
+    assert store.get_today_money_flow("600519") == before
+
+
+def test_pull_history_force_triggers_fetch(store: CacheStore) -> None:
+    """history：窗口内命中不重拉；--force（重置节流键）真正发起拉新。"""
+    from mommy_chaogu.flows.pool import CustomPool
+    from mommy_chaogu.flows.service import FlowService
+
+    class _CountingHistory:
+        name = "counting"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self._last_fetch_attempt: dict[str, datetime] = {}
+
+        def get_history_money_flow(self, code: str, days: int = 30) -> list[MoneyFlow]:
+            self.calls += 1
+            return [_flow(code)]
+
+    inner = _CountingHistory()
+    cfg = CacheConfig(money_flow_history_fetch_interval_seconds=86400)
+    adapter = CachedMarketDataAdapter(inner, store, config=cfg)  # type: ignore[arg-type]
+    service = FlowService(adapter, store)
+    pool = CustomPool(["600519"])
+
+    service.pull_history(pool, days=30)  # 首次拉新
+    service.pull_history(pool, days=30)  # 窗口内命中缓存，不重拉
+    assert inner.calls == 1
+
+    service.pull_history(pool, days=30, force=True)  # --force 真正拉新
+    assert inner.calls == 2
+
+
+def test_store_migrates_old_today_money_flow_schema(tmp_path: Path) -> None:
+    """旧库（today_money_flow_cache 无 trade_date 列）平滑迁移：加列不重建、不丢数据。"""
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        "CREATE TABLE today_money_flow_cache ("
+        "code TEXT PRIMARY KEY, flows_json TEXT NOT NULL, fetched_at TIMESTAMP NOT NULL)"
+    )
+    con.execute(
+        "INSERT INTO today_money_flow_cache (code, flows_json, fetched_at) "
+        "VALUES ('600519', '[]', '2026-01-01 00:00:00')"
+    )
+    con.commit()
+    con.close()
+
+    store = CacheStore(db)  # 触发迁移
+    entry = store.get_today_money_flow_entry("600519")
+    assert entry is not None
+    assert entry.trade_date is None  # 旧行无交易日 → 读侧按 stale
+    assert entry.flows == []
+
+    store.set_today_money_flow("600519", [], trade_date="2026-10-10")
+    updated = store.get_today_money_flow_entry("600519")
+    assert updated is not None and updated.trade_date == "2026-10-10"

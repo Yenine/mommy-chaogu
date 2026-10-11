@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import pytest
+
 from mommy_chaogu.market_data.fallback_adapter import FallbackAdapter
 
 # ---------- helpers ----------
@@ -243,3 +245,70 @@ class TestMoneyFlowAllFail:
     def test_history_money_flow_all_fail_returns_empty_list(self):
         fb = FallbackAdapter([_MockAdapter("only")])
         assert fb.get_history_money_flow("600519", days=30) == []
+
+
+# ---------- 七个 list 返回方法的统一契约（issue #3 整类收口） ----------
+
+
+class _AllFailAdapter:
+    """实现全部七个 list 返回方法、且全部失败（可配置抛异常或返回 None）。"""
+
+    name = "all_fail"
+
+    def __init__(self, *, raise_exc: bool) -> None:
+        self.raise_exc = raise_exc
+
+    def _fail(self) -> Any:
+        if self.raise_exc:
+            raise RuntimeError("boom")
+        return None
+
+    def get_quotes(self, codes: list[str]) -> Any:
+        return self._fail()
+
+    def list_market_quotes(self) -> Any:
+        return self._fail()
+
+    def get_bars(self, code: str, **kwargs: Any) -> Any:
+        return self._fail()
+
+    def get_ticks(self, code: str, limit: int | None = None) -> Any:
+        return self._fail()
+
+    def get_belonging_boards(self, code: str) -> Any:
+        return self._fail()
+
+    def get_today_money_flow(self, code: str) -> Any:
+        return self._fail()
+
+    def get_history_money_flow(self, code: str, days: int = 30) -> Any:
+        return self._fail()
+
+
+_SEVEN_LIST_CALLS: list[tuple[str, Any]] = [
+    ("get_quotes", lambda a: a.get_quotes(["600519"])),
+    ("list_market_quotes", lambda a: a.list_market_quotes()),
+    ("get_bars", lambda a: a.get_bars("600519")),
+    ("get_ticks", lambda a: a.get_ticks("600519")),
+    ("get_belonging_boards", lambda a: a.get_belonging_boards("600519")),
+    ("get_today_money_flow", lambda a: a.get_today_money_flow("600519")),
+    ("get_history_money_flow", lambda a: a.get_history_money_flow("600519", days=30)),
+]
+
+
+@pytest.mark.parametrize("raise_exc", [True, False], ids=["all_raise", "all_none"])
+@pytest.mark.parametrize(
+    "method_name, call", _SEVEN_LIST_CALLS, ids=[c[0] for c in _SEVEN_LIST_CALLS]
+)
+def test_all_seven_list_methods_never_return_none(
+    method_name: str, call: Any, raise_exc: bool
+) -> None:
+    """全失败 stub 链：七个 list 返回方法一律返回 []，绝不返回 None。
+
+    覆盖契约的整类（Protocol 中所有返回 list 的方法），防止 issue #3 那样
+    「只修了 quotes 侧、漏了其它」的惯犯缺口再次出现。
+    """
+    fb = FallbackAdapter([_AllFailAdapter(raise_exc=raise_exc)])
+    result = call(fb)
+    assert result is not None, f"{method_name} 返回了 None"
+    assert result == []

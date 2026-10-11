@@ -15,7 +15,7 @@ from mommy_chaogu.cache.adapter import CachedMarketDataAdapter
 from mommy_chaogu.cache.config import CacheConfig, default_config
 from mommy_chaogu.cache.manager import CacheManager
 from mommy_chaogu.cache.schema import SCHEMA_SQL
-from mommy_chaogu.cache.store import CacheStore, QuoteCacheEntry
+from mommy_chaogu.cache.store import CacheStore, QuoteCacheEntry, TodayFlowCacheEntry
 
 __all__ = [
     "SCHEMA_SQL",
@@ -24,5 +24,6 @@ __all__ = [
     "CacheStore",
     "CachedMarketDataAdapter",
     "QuoteCacheEntry",
+    "TodayFlowCacheEntry",
     "default_config",
 ]

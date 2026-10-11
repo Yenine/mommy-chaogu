@@ -125,6 +125,9 @@ class FlowService:
         return flows
 
     def _force_fetch_history(self, code: str, days: int) -> list[MoneyFlow]:
+        # 重置该 code 的 history 节流键——CachedMarketDataAdapter.get_history_money_flow
+        # 现在会读这个键（`_should_fetch`），因此 force 真正绕过缓存命中分支发起拉新；
+        # 此前 history 路径从不读该键，force 是空操作（Q1 资金流收口修复）。
         self.adapter._last_fetch_attempt[f"history_flow:{code}"] = datetime.min.replace(tzinfo=UTC)
         flows = self.adapter.get_history_money_flow(code, days=days)
         return flows

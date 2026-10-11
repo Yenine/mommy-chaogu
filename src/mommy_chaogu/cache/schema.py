@@ -44,11 +44,14 @@ CREATE TABLE IF NOT EXISTS money_flow_cache (
     PRIMARY KEY (code, trade_date)
 );
 
--- 当日资金流最新（每个 code 一份）
+-- 当日资金流最新（每个 code 一份）。
+-- trade_date 记录该数据所属交易日（北京时区 YYYY-MM-DD）：跨交易日命中时
+-- 必须按 stale 处理并标注日期，不得把上一交易日的累计当今日（Q1 资金流收口）。
 CREATE TABLE IF NOT EXISTS today_money_flow_cache (
     code TEXT PRIMARY KEY,
     flows_json TEXT NOT NULL,
-    fetched_at TIMESTAMP NOT NULL
+    fetched_at TIMESTAMP NOT NULL,
+    trade_date TEXT
 );
 
 -- 全市场快照（保留多份历史，便于看历史涨跌榜变化）

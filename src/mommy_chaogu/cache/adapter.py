@@ -101,9 +101,9 @@ class CachedMarketDataAdapter:
             "miss": 0,
         }
         # 最近一次数据来源（供调用方感知数据新鲜度）
-        self.last_source: str = (
-            ""  # "network", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
-        )
+        self.last_source: str = ""  # "network", "network_empty", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
+        # 最近一次资金流数据所属交易日（北京时区 YYYY-MM-DD）——跨日 stale 时标注给调用方
+        self.last_source_trade_date: str = ""
 
     def close(self) -> None:
         """Release the cache store owned by this adapter."""
@@ -521,86 +521,131 @@ class CachedMarketDataAdapter:
     # ============================================================
 
     def get_today_money_flow(self, code: str) -> list[MoneyFlow]:
-        """当日资金流：节流缓存（默认 5 分钟）。"""
-        cached = self.store.get_today_money_flow(code)
+        """当日资金流：节流缓存 + 交易日维度（默认 5 分钟）。
+
+        口径（Q1 资金流收口）：
+        - 跨交易日命中：上一交易日的数据不得当今日，一律视作需要拉新。
+        - 拉新失败（抛异常 / 底层返回 None）：有旧缓存则返回旧缓存并标 ``stale_cache``
+          （绝不标 network）；无旧缓存返回 ``[]``。
+        - 拉新返回非空：写缓存（带交易日）并标 ``network``。
+        - 拉新返回空列表：多源链会把「全部失败」折叠成空列表，无法与「源确认无数据」
+          区分；按钉死口径「失败保旧优先」，有旧缓存一律保旧标 ``stale_cache``；
+          仅当无旧缓存时才把它作为「确认无数据」写入并标 ``network_empty``（与失败可区分）。
+        """
+        entry = self.store.get_today_money_flow_entry(code)
+        today = _bar_trade_date(_utcnow())
         key = f"today_flow:{code}"
 
-        if not self._should_fetch(key, self.config.today_money_flow_fetch_interval_seconds):
-            # 不到拉新间隔 → 直接用缓存
-            if cached is not None:
+        due = self._should_fetch(key, self.config.today_money_flow_fetch_interval_seconds)
+        if entry is not None and entry.trade_date != today:
+            # 跨交易日命中：即使未到节流窗口，也必须尝试拉新，绝不把昨日当今日
+            due = True
+
+        if not due:
+            if entry is not None:
                 self.stats_counters["hits"] += 1
                 self.last_source = "cache"
-                return [_money_flow_from_dict(d) for d in cached]
+                self.last_source_trade_date = entry.trade_date or ""
+                return [_money_flow_from_dict(d) for d in entry.flows]
             self.last_source = ""
+            self.last_source_trade_date = ""
             return []
 
-        # 到拉新间隔 → 尝试拉新
+        # 到拉新间隔 / 跨日 → 尝试拉新
         self._mark_fetched(key)
         self.stats_counters["fetches"] += 1
+        fresh: list[MoneyFlow] | None
         try:
             fresh = self.inner.get_today_money_flow(code)
-            self.stats_counters["fetch_ok"] += 1
         except Exception as e:
-            self.stats_counters["fetch_fail"] += 1
             _log.warning("fetch today_money_flow(%s) failed: %s", code, e)
             fresh = None
 
-        if fresh is not None:
+        if fresh is None:
+            # 拉新失败 → 保旧
+            self.stats_counters["fetch_fail"] += 1
+            if entry is not None:
+                self.stats_counters["hits"] += 1
+                _log.info("serving cached today_money_flow(%s) (fetch failed)", code)
+                self.last_source = "stale_cache"
+                self.last_source_trade_date = entry.trade_date or ""
+                return [_money_flow_from_dict(d) for d in entry.flows]
+            self.last_source = ""
+            self.last_source_trade_date = ""
+            return []
+
+        self.stats_counters["fetch_ok"] += 1
+        if fresh:
             flow_dicts = [_money_flow_to_dict(f) for f in fresh]
             try:
-                self.store.set_today_money_flow(code, flow_dicts)
+                self.store.set_today_money_flow(code, flow_dicts, trade_date=today)
             except Exception as e:
                 _log.error("cache set_today_money_flow failed: %s", e)
             self.last_source = "network"
+            self.last_source_trade_date = today
             return fresh
 
-        # 拉新失败 → fallback 到旧缓存
-        if cached is not None:
+        # 空列表：优先保旧（无法与全链失败区分）
+        if entry is not None:
             self.stats_counters["hits"] += 1
-            _log.info("serving cached today_money_flow(%s) (fetch failed)", code)
             self.last_source = "stale_cache"
-            return [_money_flow_from_dict(d) for d in cached]
-        self.last_source = ""
+            self.last_source_trade_date = entry.trade_date or ""
+            return [_money_flow_from_dict(d) for d in entry.flows]
+        # 无旧缓存：作为「确认无数据」缓存，标记与失败可区分
+        try:
+            self.store.set_today_money_flow(code, [], trade_date=today)
+        except Exception as e:
+            _log.error("cache set_today_money_flow failed: %s", e)
+        self.last_source = "network_empty"
+        self.last_source_trade_date = today
         return []
 
     def get_history_money_flow(self, code: str, days: int = 30) -> list[MoneyFlow]:
-        """历史资金流：按日期永久缓存。"""
+        """历史资金流：按日期永久缓存 + 1 天节流窗口增量拉新。
+
+        - 窗口内命中 → 直接返回缓存（标 ``cache``）。
+        - 窗口外 / ``--force``（service 重置 ``history_flow:<code>`` 节流键）→ 增量拉新并按日 upsert。
+        - 拉新失败 → 有缓存保旧标 ``stale_cache``；无缓存返回 ``[]``。
+        """
         cached = self.store.get_money_flow_history(code)
         key = f"history_flow:{code}"
 
-        if cached is None or len(cached) == 0:
-            self._mark_fetched(key)
-            self.stats_counters["fetches"] += 1
-            try:
-                fresh = self.inner.get_history_money_flow(code, days=days)
-                self.stats_counters["fetch_ok"] += 1
-            except Exception as e:
-                self.stats_counters["fetch_fail"] += 1
-                _log.warning("fetch history_money_flow(%s) failed: %s", code, e)
-                self.last_source = "cache"
-                return []
-
-            # 按 trade_date 分组存
-            from collections import defaultdict
-
-            by_date: dict[str, list[MoneyFlow]] = defaultdict(list)
-            for f in fresh:
-                trade_date = f.timestamp.strftime("%Y-%m-%d")
-                by_date[trade_date].append(f)
-            for trade_date, flows in by_date.items():
-                flow_dicts = [_money_flow_to_dict(f) for f in flows]
-                self.store.set_money_flow_history(code, trade_date, flow_dicts)
+        if not self._should_fetch(key, self.config.money_flow_history_fetch_interval_seconds):
+            self.stats_counters["hits"] += 1
             self.last_source = "cache"
-            return fresh
+            return _history_flows_from_cache(cached)
 
-        # 有缓存
-        self.stats_counters["hits"] += 1
-        self.last_source = "cache"
-        out: list[MoneyFlow] = []
-        for d in cached:
-            flows = d.get("flows", [])
-            out.extend(_money_flow_from_dict(f) for f in flows)
-        return out
+        self._mark_fetched(key)
+        self.stats_counters["fetches"] += 1
+        fresh: list[MoneyFlow] | None
+        try:
+            fresh = self.inner.get_history_money_flow(code, days=days)
+        except Exception as e:
+            _log.warning("fetch history_money_flow(%s) failed: %s", code, e)
+            fresh = None
+        if fresh is None:
+            # 拉新失败 → 保旧
+            self.stats_counters["fetch_fail"] += 1
+            if cached:
+                self.stats_counters["hits"] += 1
+                self.last_source = "stale_cache"
+                return _history_flows_from_cache(cached)
+            self.last_source = ""
+            return []
+
+        self.stats_counters["fetch_ok"] += 1
+        # 按 trade_date 分组增量落库
+        from collections import defaultdict
+
+        by_date: dict[str, list[MoneyFlow]] = defaultdict(list)
+        for f in fresh:
+            trade_date = f.timestamp.strftime("%Y-%m-%d")
+            by_date[trade_date].append(f)
+        for trade_date, flows in by_date.items():
+            flow_dicts = [_money_flow_to_dict(f) for f in flows]
+            self.store.set_money_flow_history(code, trade_date, flow_dicts)
+        self.last_source = "network"
+        return fresh
 
     # ============================================================
     # 板块（不缓存，每次直接拉新）
@@ -657,16 +702,23 @@ class CachedMarketDataAdapter:
             inner_name = getattr(self.inner, "__class__", None)
             inner_name = inner_name.__name__ if inner_name else ""
             if "Efinance" in inner_name:
-                return "东方财富 实时"
+                label = "东方财富 实时"
             elif "Tencent" in inner_name:
-                return "腾讯财经 实时"
-            return "实时数据"
-        if self.last_source == "cache":
-            return "本地缓存"
-        if self.last_source in ("stale_cache", "stale_snapshot"):
+                label = "腾讯财经 实时"
+            else:
+                label = "实时数据"
+        elif self.last_source == "network_empty":
+            label = "实时数据（当日无资金流数据）"
+        elif self.last_source == "cache":
+            label = "本地缓存"
+        elif self.last_source in ("stale_cache", "stale_snapshot"):
             # 拉新失败后翻出的旧数据——与"刚缓存"区分，妈妈看得见可能过期
-            return "本地缓存（拉新失败，可能过期）"
-        return self.last_source
+            label = "本地缓存（拉新失败，可能过期）"
+        else:
+            label = self.last_source
+        if self.last_source_trade_date:
+            label = f"{label}｜数据日期 {self.last_source_trade_date}"
+        return label
 
 
 # ---------- 内部：MoneyFlow 序列化（简化版） ----------
@@ -749,3 +801,14 @@ def _money_flow_from_dict(d: dict[str, Any]) -> MoneyFlow:
         super_large_net=_money(d["super_large_net"]),
         main_net_ratio=Decimal(str(d["main_net_ratio"])) if d.get("main_net_ratio") else None,
     )
+
+
+def _history_flows_from_cache(cached: list[dict[str, Any]] | None) -> list[MoneyFlow]:
+    """CacheStore.get_money_flow_history 的 wrapper 列表 → MoneyFlow 列表。"""
+    if not cached:
+        return []
+    out: list[MoneyFlow] = []
+    for d in cached:
+        for f in d.get("flows", []):
+            out.append(_money_flow_from_dict(f))
+    return out

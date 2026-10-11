@@ -115,6 +115,16 @@ class QuoteCacheEntry:
         return (_utcnow() - self.fetched_at).total_seconds()
 
 
+@dataclass(frozen=True, slots=True)
+class TodayFlowCacheEntry:
+    """today_money_flow_cache 表的单行（含交易日维度）。"""
+
+    code: str
+    flows: list[dict[str, Any]]
+    fetched_at: datetime
+    trade_date: str | None  # 旧库迁移前无此列，可能为 None
+
+
 class CacheStore(EngineOwner):
     """SQLite-backed 行情缓存。
 
@@ -134,7 +144,20 @@ class CacheStore(EngineOwner):
                 stmt = stmt.strip()
                 if stmt:
                     conn.execute(text(stmt))
+            self._migrate_today_money_flow_trade_date(conn)
         self._Session: sessionmaker[Session] = sessionmaker(self.engine, expire_on_commit=False)
+
+    @staticmethod
+    def _migrate_today_money_flow_trade_date(conn: Any) -> None:
+        """向后兼容迁移：给 today_money_flow_cache 补 trade_date 列。
+
+        ``CREATE TABLE IF NOT EXISTS`` 不会给已存在的表加列，所以旧用户库需要
+        显式 ``ALTER TABLE ADD COLUMN``——只加列，不重建表、不丢数据。旧行
+        trade_date 为 NULL，读侧一律按「未知日期 → stale」处理。
+        """
+        cols = {row[1] for row in conn.execute(text("PRAGMA table_info(today_money_flow_cache)"))}
+        if cols and "trade_date" not in cols:
+            conn.execute(text("ALTER TABLE today_money_flow_cache ADD COLUMN trade_date TEXT"))
 
     @contextmanager
     def session(self) -> Iterator[Session]:
@@ -405,18 +428,49 @@ class CacheStore(EngineOwner):
                 return None
             return cast(list[dict[str, Any]], json.loads(row[0]))
 
-    def set_today_money_flow(self, code: str, flows: list[dict[str, Any]]) -> None:
+    def get_today_money_flow_entry(self, code: str) -> TodayFlowCacheEntry | None:
+        """同 ``get_today_money_flow``，但带交易日（供缓存层做跨日判定）。"""
+        with self.session() as s:
+            row = s.execute(
+                text(
+                    "SELECT flows_json, fetched_at, trade_date "
+                    "FROM today_money_flow_cache WHERE code = :code"
+                ),
+                {"code": code},
+            ).first()
+            if row is None:
+                return None
+            fetched_at = row[1] if isinstance(row[1], datetime) else datetime.fromisoformat(row[1])
+            return TodayFlowCacheEntry(
+                code=code,
+                flows=cast(list[dict[str, Any]], json.loads(row[0])),
+                fetched_at=fetched_at,
+                trade_date=row[2],
+            )
+
+    def set_today_money_flow(
+        self, code: str, flows: list[dict[str, Any]], trade_date: str | None = None
+    ) -> None:
+        """写入/覆盖当日资金流。``trade_date`` 缺省按北京当前交易日。"""
+        if trade_date is None:
+            trade_date = _beijing_trade_date(_utcnow())
         flows_json = json.dumps(flows, ensure_ascii=False)
         with self.session() as s:
             s.execute(
                 text("""
-                    INSERT INTO today_money_flow_cache (code, flows_json, fetched_at)
-                    VALUES (:code, :json, :fetched)
+                    INSERT INTO today_money_flow_cache (code, flows_json, fetched_at, trade_date)
+                    VALUES (:code, :json, :fetched, :trade_date)
                     ON CONFLICT(code) DO UPDATE SET
                         flows_json = excluded.flows_json,
-                        fetched_at = excluded.fetched_at
+                        fetched_at = excluded.fetched_at,
+                        trade_date = excluded.trade_date
                 """),
-                {"code": code, "json": flows_json, "fetched": _utcnow()},
+                {
+                    "code": code,
+                    "json": flows_json,
+                    "fetched": _utcnow(),
+                    "trade_date": trade_date,
+                },
             )
 
     def get_money_flow_history(
