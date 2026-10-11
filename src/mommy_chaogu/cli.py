@@ -368,6 +368,21 @@ def _run_single_query(
     sys.exit(0)
 
 
+def _configure_cli_logging(verbose: bool) -> None:
+    """非 -v 模式收敛底层英文告警，避免污染新用户第一屏。
+
+    只控制展示，不改变库/适配器行为（重试、返回值一切照旧）；`-v` 模式不做
+    任何压制，保留完整日志用于诊断。覆盖本项目包与上游 efinance / urllib3 /
+    requests 的 warning 级英文输出。
+    """
+    if verbose:
+        return
+    import logging
+
+    for name in ("mommy_chaogu", "efinance", "urllib3", "requests"):
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+
 def main_mommy() -> None:
     """mommy — 面向用户的自然语言入口。
 
@@ -427,6 +442,8 @@ def main_mommy() -> None:
             f"⚠️ 已忽略无法识别的参数: {' '.join(unknown)}（完整用法见 mommy --help）",
             file=sys.stderr,
         )
+
+    _configure_cli_logging(args.verbose)
 
     # --setup 模式：运行首次配置引导
     if args.setup:

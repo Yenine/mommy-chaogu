@@ -24,7 +24,7 @@ from typing import Any
 from dotenv import dotenv_values
 
 from mommy_chaogu.agent.llm import SUPPORTED_PROVIDERS
-from mommy_chaogu.config import default_user_env_path, load_runtime_env
+from mommy_chaogu.config import default_user_config_dir, default_user_env_path, load_runtime_env
 
 # InputFunc 接受提示语、返回用户输入
 InputFunc = Callable[[str], str]
@@ -73,6 +73,36 @@ _PROVIDERS: dict[str, dict[str, str]] = {
     }
     for name, details in _PROVIDER_DETAILS.items()
 }
+
+
+# 一次性「暂不配置」跳过标记：用户在向导里显式选择先用行情模式时落盘。
+# 只挡自动拦截（check_and_run_setup），不挡主动 `mommy setup`。
+_SETUP_SKIP_MARKER_NAME = "setup-skipped"
+
+
+def setup_skip_marker_path() -> Path:
+    """跳过标记文件路径（落在用户配置目录，随 MOMMY_CONFIG_DIR 变化，不写死）。"""
+    return default_user_config_dir() / _SETUP_SKIP_MARKER_NAME
+
+
+def is_setup_skipped() -> bool:
+    """用户是否已显式选择「暂不配置 AI」。"""
+    return setup_skip_marker_path().is_file()
+
+
+def mark_setup_skipped() -> None:
+    """记录「暂不配置」——后续启动不再自动拦截。"""
+    marker = setup_skip_marker_path()
+    marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    marker.write_text("skipped\n", encoding="utf-8")
+    with suppress(OSError):
+        os.chmod(marker, 0o600)
+
+
+def clear_setup_skip() -> None:
+    """成功配置 AI 后撤销跳过标记。"""
+    with suppress(OSError):
+        setup_skip_marker_path().unlink()
 
 
 def preferred_setup_env_path() -> Path:
@@ -275,19 +305,27 @@ def run_setup_wizard(
         for idx, name in enumerate(provider_keys, 1):
             info = _PROVIDERS[name]
             print(f"  {idx}. {info['label']}（默认模型 {info['default_model']}）")
+        print("  0. 暂不配置 AI，先用行情模式")
         print()
 
-        choice = _safe_input(input_func, f"请输入序号 (1-{len(provider_keys)})，或 Ctrl-C 退出：")
+        choice = _safe_input(input_func, f"请输入序号 (0-{len(provider_keys)})，或 Ctrl-C 退出：")
         if choice is None:
             return False
-        try:
-            idx = int(choice.strip())
-            if not 1 <= idx <= len(provider_keys):
-                print(f"无效序号: {choice}")
-                return False
-        except ValueError:
-            print(f"无效输入: {choice}")
+        stripped = choice.strip()
+        if stripped == "0":
+            mark_setup_skipped()
+            print("\n💡 已选择暂不配置 AI，将进入仅行情模式（行情/资金流等无需 AI 即可用）。")
+            print("   随时运行 `mommy setup` 重新配置。")
             return False
+        try:
+            idx = int(stripped)
+        except ValueError:
+            # 输错不退出——重问（对齐 verify_llm 的重试模式）
+            print(f"无效输入: {choice}，请输入 0、1-{len(provider_keys)}。")
+            continue
+        if not 1 <= idx <= len(provider_keys):
+            print(f"无效序号: {choice}，请输入 0、1-{len(provider_keys)}。")
+            continue
 
         provider = provider_keys[idx - 1]
         info = _PROVIDERS[provider]
@@ -329,6 +367,7 @@ def run_setup_wizard(
     # --- 4. 私密写入配置并让当前进程立即可用 ---
     _write_env_file(env_path, provider, api_key, model=model)
     activate_runtime_llm_profile(provider, model, api_key)
+    clear_setup_skip()  # 已配置真实 AI → 撤销「暂不配置」标记
     print(f"\n✅ AI 配置已保存：{provider} / {model}")
     print(f"   私有配置文件：{env_path.resolve()}")
 
@@ -475,6 +514,11 @@ def check_and_run_setup(*, offer_interface: bool = False) -> bool:
     except ValueError:
         # An invalid provider is recoverable through onboarding.
         pass
+
+    if is_setup_skipped():
+        # 用户已显式选择「暂不配置 AI」——不再拦截启动；主动 `mommy setup`
+        # 仍会直接进入向导（该路径不经过本函数）。
+        return False
 
     print("\n⚠️ 未检测到可用的 AI 配置，将启动首次配置向导。")
     print("   稍后也可运行 `mommy setup` 重新配置。\n")
