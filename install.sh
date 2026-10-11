@@ -12,7 +12,28 @@
 set -eu
 
 REPOSITORY="coffee-man666/mommy-chaogu"
-DEFAULT_SOURCE="mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz"
+
+# 默认安装最新 release（版本可复现、自报版本与实际一致）；API 不可达时退回 main。
+# 想跟踪 main 开发版，显式指定：
+#   MOMMY_INSTALL_SOURCE='mommy-chaogu @ https://github.com/coffee-man666/mommy-chaogu/archive/refs/heads/main.tar.gz'
+resolve_default_source() {
+    latest_tag=""
+    if command -v curl >/dev/null 2>&1; then
+        latest_tag=$(curl -LsSf --max-time 10 \
+            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || latest_tag=""
+    elif command -v wget >/dev/null 2>&1; then
+        latest_tag=$(wget -q -T 10 -O - \
+            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null \
+            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || latest_tag=""
+    fi
+    if [ -n "$latest_tag" ]; then
+        printf '%s' "mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/tags/${latest_tag}.tar.gz"
+    else
+        printf '%s' "mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz"
+    fi
+}
+DEFAULT_SOURCE=$(resolve_default_source)
 PACKAGE_SOURCE=${MOMMY_INSTALL_SOURCE:-$DEFAULT_SOURCE}
 PYTHON_VERSION=${MOMMY_INSTALL_PYTHON:-3.12}
 

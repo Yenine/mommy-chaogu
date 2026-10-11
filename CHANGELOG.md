@@ -5,47 +5,72 @@
 
 ---
 
-## [Unreleased]
+## [1.6.0] - 2026-10-11
 
-### 变更
-
-- **ws 连接日志挂调试开关**——前端 `api/ws.ts` 的 connecting/connected/disconnected
-  日志默认不打（`localStorage.mommyWsDebug=1` 开启），不再污染用户浏览器控制台；
-  error 级别保持始终输出。Issue 模板与 CONTRIBUTING 的 Discussions 链接修正为
-  当前仓库地址。portfolio 实时价格拉取失败的静默降级补 warning、vector_search
-  非法 JSON 降级补 debug（其余静默异常点经研判为惯用正确写法，保持不动）。
-
-### 修复
-
-- **TUI 启动恢复覆盖用户新会话的产品竞态**——慢速环境下启动恢复 worker 与用户输入并发：
-  `/new` 之后晚到的 `_apply_recovery` 会把记忆换绑回旧会话（`recover_latest` 的
-  `_active` 副作用绕过简单守卫），CI 上表现为 `test_new_command_starts_fresh_session`
-  间歇失败。SessionJournal 引入会话世代计数（`/new`、`/resume` 递增），恢复 worker
-  快照世代，回放时世代已变即放弃；附确定性回归测试（注入过期世代）。
-- **TUI 挂载期 DOM 查询竞态（NoMatches 随机崩溃）**——两类共 23 处：
-  1. `on_mount` 里 `query_one` 自身 compose 子节点在动态挂载时偶发未就绪，随机抛
-     `NoMatches` 炸掉整个 Mount 流程（`test_tui_confirm` 本地实测 15% 挂率）；
-  2. worker 线程经 `call_from_thread` 回主线程的 16 个回调里 `query_one(ChatView)`
-     撞启动窗口同样抛 `NoMatches`，导致整轮对话死掉（确认决定悬空、偶发线程不收尾挂死）。
-  统一改成 `thinking.py` 已验证的 `try/except + call_after_refresh` 重试模式（新增
-  `_chat_or_defer` 统一入口，消息队列 FIFO 保序）。修复后 `test_tui_confirm`
-  20 连跑 0 败 0 挂（基线 10 跑 2 败）。另补 `test_tui_confirm.py` 一处未 assert 的
-  `_wait_until`。
-- **依赖 CVE**——anyio 4.14.1→4.14.2（3 个 CVE）、soupsieve 2.8.4→2.10（2 个）、
-  pyjwt 2.13.0→2.15.1（10 个，审计当日新披露）。`pip-audit` 恢复全绿。
-- **前端打包产物过期**——重建 `web/static`（main 上 Frontend CI 检查
-  `diff -qr dist ../src/mommy_chaogu/web/static` 连红 3 次的原因之一）。
+v1.5.0 以来 71 个提交的正式发布：交易心法六阶段落地（可选分析方法）、TUI 交互升级、
+资金流降级正确性收口、CLI 无 Key 首个价值时刻修复，以及七项缺陷修复与依赖安全升级。
 
 ### 新增
 
-- **web 股票搜索远程兜底**——`/api/stocks/search` 本地池（自选/产业链/缓存）未命中时
-  调用 `search_stocks_by_name` 远程搜索，`source` 新增 `"remote"`（前端标签"全网"）。
-  网页搜索框输入"比亚迪"等新股票名不再无联想。
-- **股票名称搜索 `search_stock` 工具**——新增 `search_stock`（`market_data/stock_search.py`，东财
-  suggest 优先 + 新浪 suggest 兜底）：名称/拼音 → 代码解析，覆盖 A 股 + 美股（"比亚迪"→002594、
-  "maotai"→600519）。修复用户问"看看比亚迪"时 LLM 只能硬传中文名、efinance 失败即整链报
-  "未找到"的问题。`get_quote` 同时支持直接传中文名称（自动解析，参数 schema 不再限制为纯代码），
-  system prompt 已引导 LLM 先搜索再查行情。
+- **交易心法落地六阶段（可选分析方法，不进默认工作流）**——个股闭环 `stock_closed_loop`
+  工作流（K 线右侧确认信号）；predictions 增加「左侧→右侧」阶段（stage/confirmed_at
+  与阶段回写工具）；板块轮动多日相对强弱（`get_sector_bars` / `get_sector_momentum`
+  全量板块池 N 日收益排名）；市场环境路径式状态（`get_index_bars` +
+  `market_regime_series` 逐日三态序列）；超短期日内层（`get_intraday_profile`
+  日内画像、腾讯分钟 K 备源修复坍缩）；右侧确认常驻化（三处评估点旁挂自定义告警 +
+  earnings 日频调度）。5 个新行情工具全部纳入 MCP `market-only` 白名单，宿主 Agent
+  可直接使用；心法始终保持可选模式，默认工作流（如 morning_brief）零耦合。
+- **TUI 交互升级**——写操作内联确认条、工具轨迹呼吸圈与人话摘要、会话恢复
+  （`/resume` / `/new` + 启动自动恢复）、推理思考折叠、会话用量条；6 套主题与
+  `/theme` 主题选择器（↑↓ 实时预览）。
+- **股票名称搜索**——新增 `search_stock` 工具（`market_data/stock_search.py`，东财
+  suggest 优先 + 新浪 suggest 兜底）：名称/拼音 → 代码解析，覆盖 A 股 + 美股
+  （"比亚迪"→002594、"maotai"→600519）；`get_quote` 支持直接传中文名称；
+  web 搜索框本地池未命中时远程兜底（`source: "remote"`，前端标签「全网」）。
+- **DeepSeek Harness（dsh）**成为第五个 agent-managed 宿主。
+- **plugins store 宣传站**上线 `site/`（GitHub Pages）。
+
+### 变更
+
+- **工程质量基线抬升**——`mypy --strict` 全模块强制（历史豁免清零）；metrics 收敛
+  单一真相源、资金一律 Decimal、回测前视显式标注；ChatCallbacks 14 参 8 回调归一；
+  TUI 平行实现收编进 services 层。
+- **CLI 无 Key 首个价值时刻**——工作流结果值级渲染（单只行情显示「600519 贵州茅台：
+  1263.0 (+0.57%)」式数值输出，而非只打字段名）；空数据步骤给显式中文原因；首次配置
+  向导新增「0. 暂不配置 AI，先用行情模式」（落跳过标记，二次启动不再拦截，输错序号
+  改为重问）；非 `-v` 模式收敛 mommy_chaogu / efinance / urllib3 / requests 的英文
+  warning（`-v` 完整保留）。
+- **setup 向导 MiniMax 区域端点自动探测**——国内站 / 国际站 key 用错不再只报 401。
+- **ws 连接日志挂调试开关**——默认不打（`localStorage.mommyWsDebug=1` 开启），
+  不再污染浏览器控制台；error 级别始终输出。
+- **Server酱推送下线**——实现、配置与文档全量清理（Bark 与微信通道不受影响）。
+
+### 修复
+
+- **资金流降级正确性收口**——拉新失败的空结果不再清掉旧缓存并误标「实时」：失败
+  一律保旧缓存并标 `stale_cache`，与「确认无数据」（`network_empty`）可区分；当日
+  资金流缓存补交易日维度，跨交易日不再把昨日累计当今日展示（返回标注数据日期）；
+  历史资金流有缓存也走 1 天节流窗口增量拉新、`--force` 真正生效（原先只重置一个
+  从未被读的键）；FallbackAdapter 七个 list 返回方法全链失败一律收敛 `[]`（补齐
+  `get_ticks` / `get_belonging_boards` 两处 None 穿透），并新增七方法契约测试根治
+  该类惯犯。
+- **七项缺陷修复（修复 bundle）**——`mcp` 依赖加上界 `<2`（2.x 破坏性变更会炸
+  assembly 测试与源码安装）；`FallbackAdapter.get_bars` 全链失败返回 None；比亚迪
+  分析工作流崩溃（PR #72 只修了工具层、工作流层漏接）；`mommy-monitor stats` 绕过
+  降级链（东财不可用时与 web/TUI 对同一自选池给出相反事实）；flows 自选池读错数据库
+  （静默空池）；基本面「取数失败」与「取到但字段为空」不可区分；MiniMax 区域端点。
+- **盘中 e2e 实测六处后端修复**——停牌股 GapOpen 不再算 -100% 跳空低开；信号持久化
+  改边沿触发（5 秒轮询不再重复刷库）；信号日志标题去重；工作流 LLM 摘要失败时保留
+  各步骤原始数据输出而非静默；market-only 白名单补录心法 5 工具；等。
+- **Web**——未配置 AI 不再锁死全站（setup 页可跳过直达行情）；K 线空态与资金页
+  降级给出明确文案；earnings 股票端点恒空修复。
+- **TUI**——启动恢复晚到覆盖用户新会话的竞态（SessionJournal 世代计数）；挂载期
+  DOM 查询竞态 23 处（NoMatches 随机崩溃 / 确认悬空挂死，改 `call_after_refresh`
+  重试模式，20 连跑 0 败 0 挂）；日志改走文件句柄不再涂花输入框；启动焦点不抢回
+  已被接管的焦点。
+- **依赖与 CI**——npm audit 高危清零（vue / dompurify 等）+ vitest 升级清除 critical；
+  uv.lock 同步 mcp 上界；urllib3 / anyio / soupsieve / pyjwt CVE 升级；前端打包产物
+  重建对齐。
 
 ## [1.5.0] - 2026-08-19
 

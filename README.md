@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/coffee-man666/mommy-chaogu/actions/workflows/ci.yml/badge.svg)](https://github.com/coffee-man666/mommy-chaogu/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![Release: v1.5.0](https://img.shields.io/badge/release-v1.5.0-blue.svg)](CHANGELOG.md)
+[![Release: v1.6.0](https://img.shields.io/badge/release-v1.6.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 </div>
@@ -55,7 +55,7 @@ Agent 会先以公共市场数据开始，不要求再配置一套项目内 LLM 
 macOS / Linux：
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/coffee-man666/mommy-chaogu/v1.5.0/install.sh | sh
+curl -LsSf https://raw.githubusercontent.com/coffee-man666/mommy-chaogu/v1.6.0/install.sh | sh
 mommy
 ```
 
@@ -66,7 +66,7 @@ mommy
 不喜欢直接执行远程脚本？可以先下载并检查：
 
 ```bash
-curl -LO https://raw.githubusercontent.com/coffee-man666/mommy-chaogu/v1.5.0/install.sh
+curl -LO https://raw.githubusercontent.com/coffee-man666/mommy-chaogu/v1.6.0/install.sh
 less install.sh
 sh install.sh
 ```
