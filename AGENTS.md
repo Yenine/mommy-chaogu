@@ -243,3 +243,64 @@ mommy-chaogu 是直接服务最终用户的应用，不是为其他应用提供�
 - 新增 agent 工具：在 `agent/tools/` 对应域模块（quote/sector/flows/bars/holdings/intel/alerts/memory/themes）的 `DEFS` 与 `HANDLERS` 各加一项，`registry.py` 自动聚合（import 时校验两边名字一致），无需改注册表
 - 拉新失败保留旧数据（数据库是唯一真相源）
 - 新增模块在 `db_paths.py` 里定义数据库路径，不要硬编码
+
+## 发版与版本管理
+
+参照三个公开标准：版本号遵循 [Semantic Versioning 2.0.0](https://semver.org/)；
+CHANGELOG 与 release notes 遵循 [Keep a Changelog 1.1.0](https://keepachangelog.com/)；
+提交信息遵循 Conventional Commits（见开发规范）。
+
+### 版本号怎么定（SemVer）
+
+- **MAJOR**：不兼容变更——数据库布局重排且无自动迁移、CLI 参数语义反转、配置格式破坏性修改
+- **MINOR**：向后兼容的新能力（新工具 / 新工作流 / 新入口）；当前阶段发版以这档为主
+- **PATCH**：缺陷修复与安全升级，不含新能力
+- 犹豫时问一句：用户升级后有没有「行为变了但没被告知」的地方？有 → 至少 MINOR
+- 版本号单一真相源是 `src/mommy_chaogu/version.py`（`pyproject.toml` dynamic version 引用它）。
+  `tests/test_version.py` 断言 `__version__` / `importlib.metadata` / web app 三处一致，
+  改版本号必须同步该测试。注意：改 `version.py` 后本地 venv 的包元数据仍是旧的，
+  需 `uv sync --frozen --extra dev --reinstall-package mommy-chaogu` 刷新后再跑测试
+
+### 什么时候可以发版（全部满足才发）
+
+1. CHANGELOG 的 `[Unreleased]` 段已积累**用户可感知**的变更（纯内部重构不构成发版理由）
+2. CI 全绿——release-gate 聚合断言全部 8 个 job（含前端 dist 一致性检查与依赖审计）
+3. 数据库结构变更已有平滑迁移（不重建表、不丢数据）并通过 migration job
+4. `mommy --version` 自报号与实际内容一致（install.sh 默认源解析 latest tag，装到的就是 tag 内容）
+
+### 发版流程（顺序不可颠倒）
+
+1. 合入待发布提交；特性分支用 `--no-ff` 合并，保留分支边界可追溯
+2. 发版材料一次提交：
+   - CHANGELOG：`[Unreleased]` → `[x.y.z] - 日期`，按 Keep a Changelog 的 Added / Changed / Fixed 分节
+   - `version.py` + `tests/test_version.py` + README badge 与安装 URL 同步指向新版本
+   - `install.sh` 不需要改（运行时解析 latest release tag）
+3. 推送 main，**等 CI 全绿后再打 tag**——tag 不触发 CI，先打 tag 等于跳过把关
+4. `git tag -a vx.y.z` + push tag，然后 `gh release create --notes-file`（notes 见下）
+5. 发布后验证：GitHub API 的 `releases/latest` 解析到新 tag；tag tarball 返回 200
+6. 删除已合并的本地特性分支
+
+### Release notes 怎么写
+
+- **结构固定**：概述 / 新增功能 / 改进与变更 / 缺陷修复 / 安全与依赖 / 安装与升级 /
+  已知问题与能力边界
+- **缺陷修复三段式**：问题是什么 → 原来错在哪（含用户可见后果）→ 现在什么行为；
+  新功能写「叫什么、干什么、怎么触发」
+- **按子系统分组**（数据正确性 / 工作流与 CLI / Web / TUI / 安装分发），每条可核对到
+  CHANGELOG 条目；有关联 issue / PR 号的带上
+- **不营销**：不用情绪词与口号腔；能力边界如实写明（哪些环境下哪些功能不可用），
+  已知问题必须列出——诚实边界是本项目的差异化资产，写进 note 而不是藏起来
+- release notes 与 CHANGELOG 同源不同形：CHANGELOG 是完整账本（面向维护者按时间记账），
+  notes 是按用户视角重新组织、读者可据以决定是否升级的版本
+
+### 仓库卫生
+
+- `git add` 一律显式列文件，禁止 `-A` / `.`——测试套件会遗留垃圾文件（见下）
+- 本地旧版 uv（<0.8）会把 `uv.lock` 从 revision 3 反向改写为 2：任何 `uv run` 之后、
+  提交之前 `git checkout -- uv.lock`
+- 已知测试遗留物（不入仓、根因待修）：`x.db`（`test_monitor_adapter_chain` 落在仓库根）、
+  截图与临时输出目录——**不要用 gitignore 掩盖它们的产生**，根因修复前让它们保持可见
+- `.zcode/`、`.zcodeignore` 是本机会话工具产物，不入仓（已 gitignore）；`data/` 下的
+  运行时状态文件只增补 ignore 规则，不删除用户数据
+- 含用户可感知变更的合并必须同步 CHANGELOG（合并门槛；不要攒到发版时补账）
+- 发版收尾：删已合并分支；检查无游离进程与占用端口（web 默认 8000）

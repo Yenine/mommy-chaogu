@@ -54,6 +54,7 @@ data/flows_monitor.log
 data/quote_snapshot.json
 data/quote_innovative_drug.json
 data/flows_report_*.md
+data/weixin_notifications.json
 # 排除以上运行时文件，但保留 supply_chains/ 供应链数据资产（仅静态种子）
 !data/supply_chains/
 
@@ -63,8 +64,13 @@ node_modules/
 # 本地实验数据库归档（bt_* 回测 / eval-* 实验，2026-08-22 从 data/ 顶层迁入）
 data/archive/
 
-# ZCode 本机配置（含个人绝对路径 / 软链，不入仓）
-.zcode/config.json
+# ZCode 本机会话产物（workflow 草稿/运行记录/评审工作区，机器自有，不入仓）
+.zcode/
+.zcodeignore
+
+# 浏览器 e2e 与 agent 会话输出目录
+gui-test-screenshots/
+out/
 # 仓库内 dev 副本：market-watch-loop 以 gitignore 排除（同步进 bundled_skills/ 发布）；
 # market-monitoring-test 是纯实验目录，走 pyproject.toml 的 wheel exclude
 # （见 tests/test_release_consistency.py 的 _EXCLUDED_SKILL_WHITELIST 白名单）——
