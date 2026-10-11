@@ -187,17 +187,29 @@ def test_wizard_cancel_at_provider(tmp_path: Path):
     assert not env.exists()
 
 
-def test_wizard_invalid_choice(tmp_path: Path):
+def test_wizard_invalid_choice_reprompts(tmp_path: Path):
+    """无效序号不再直接退出，而是重问；给出有效输入后仍可完成配置。"""
     env = tmp_path / ".env"
-    result = run_setup_wizard(env, input_func=make_input(["9"]))
-    assert result is False
-    assert not env.exists()
+    result = run_setup_wizard(
+        env,
+        input_func=make_input(["9", "1", "", "sk-test"]),
+        verify_llm=False,
+        offer_weixin=False,
+    )
+    assert result is True
+    assert env.exists()
 
 
-def test_wizard_non_numeric_choice(tmp_path: Path):
+def test_wizard_non_numeric_choice_reprompts(tmp_path: Path):
+    """非数字输入同样重问，而不是 return False。"""
     env = tmp_path / ".env"
-    result = run_setup_wizard(env, input_func=make_input(["abc"]))
-    assert result is False
+    result = run_setup_wizard(
+        env,
+        input_func=make_input(["abc", "1", "", "sk-test"]),
+        verify_llm=False,
+        offer_weixin=False,
+    )
+    assert result is True
 
 
 def test_wizard_empty_api_key(tmp_path: Path):
@@ -474,4 +486,49 @@ def test_check_and_run_setup_declined(tmp_path: Path, monkeypatch: pytest.Monkey
     from mommy_chaogu import setup
 
     monkeypatch.setattr(setup, "run_setup_wizard", lambda *a, **kw: False)
+    assert setup.check_and_run_setup() is False
+
+
+# ---------- 一次性「暂不配置」跳过标记 ----------
+
+
+def test_wizard_option_zero_marks_skip(tmp_path: Path):
+    """选 0 → 不写 env，落跳过标记，返回 False。"""
+    env = tmp_path / ".env"
+
+    from mommy_chaogu import setup
+
+    result = run_setup_wizard(env, input_func=make_input(["0"]))
+    assert result is False
+    assert not env.exists()
+    assert setup.is_setup_skipped() is True
+
+
+def test_skip_marker_does_not_block_explicit_wizard(tmp_path: Path):
+    """跳过标记只挡自动拦截，不挡主动 `mommy setup`；完成配置后标记被撤销。"""
+    env = tmp_path / ".env"
+
+    from mommy_chaogu import setup
+
+    setup.mark_setup_skipped()
+    result = run_setup_wizard(
+        env,
+        input_func=make_input(["1", "", "sk-test"]),
+        verify_llm=False,
+        offer_weixin=False,
+    )
+    assert result is True
+    assert env.exists()
+    assert setup.is_setup_skipped() is False
+
+
+def test_check_and_run_setup_respects_skip_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.chdir(tmp_path)
+
+    from mommy_chaogu import setup
+
+    setup.mark_setup_skipped()
+    monkeypatch.setattr(
+        setup, "run_setup_wizard", lambda *a, **kw: pytest.fail("wizard should not run")
+    )
     assert setup.check_and_run_setup() is False

@@ -27,7 +27,7 @@ from rich.text import Text
 
 from mommy_chaogu.agent.service import ChatCallbacks
 from mommy_chaogu.errors import friendly_error
-from mommy_chaogu.workflow.engine import WorkflowResult
+from mommy_chaogu.workflow.engine import StepResult, WorkflowResult
 from mommy_chaogu.workflow.router import NLRouter, RouteResult
 
 if TYPE_CHECKING:
@@ -228,6 +228,12 @@ def print_workflow_result(result: WorkflowResult) -> None:
             continue
         print(f"**{sr.display_name}**")
         data = sr.data
+        problem = _step_problem(sr)
+        if problem is not None:
+            # 成功但空 / 带 error：给出显式中文原因，区分「成功有数据」与「成功但空」
+            print(f"  ⚠️ {problem}")
+            print()
+            continue
         if isinstance(data, dict):
             # 尝试提取关键字段
             if "indexes" in data:
@@ -254,15 +260,98 @@ def print_workflow_result(result: WorkflowResult) -> None:
                         chg = st.get("change_pct", 0)
                         sign = "+" if chg and chg >= 0 else ""
                         print(f"  {code} {name}: {sign}{chg}%" if chg else f"  {code} {name}")
+            elif _is_quote_like(data):
+                # 单只行情：核心标量带值（而非只打字段名）
+                _print_quote_fields(data)
             else:
-                # 概要输出
-                keys = list(data.keys())[:5]
-                print(f"  ({', '.join(keys)})")
+                # 其他未知 dict：标量字段带值，列表/嵌套 dict 折叠
+                _print_scalar_fields(data)
         elif isinstance(data, list):
             print(f"  共 {len(data)} 条")
         elif isinstance(data, str) and data:
             print(f"  {data[:200]}")
         print()
+
+
+def _is_scalar(value: object) -> bool:
+    """JSON 标量：字符串 / 数字 / 布尔（列表与嵌套 dict 不算）。"""
+    return isinstance(value, (str, int, float, bool))
+
+
+def _format_scalar(value: object) -> str:
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    return str(value)
+
+
+def _is_quote_like(data: dict[str, object]) -> bool:
+    """含 code 且含 price/change_pct 的单只行情 dict。"""
+    return "code" in data and ("price" in data or "change_pct" in data)
+
+
+_QUOTE_EXTRA_KEYS = (
+    "open",
+    "high",
+    "low",
+    "prev_close",
+    "change",
+    "volume",
+    "turnover",
+    "turnover_rate",
+    "volume_ratio",
+    "pe_dynamic",
+)
+
+
+def _print_quote_fields(data: dict[str, object]) -> None:
+    """单只行情 dict：代码/名称/现价/涨跌幅 + 核心标量带值。"""
+    code = data.get("code", "?")
+    name = data.get("name", "")
+    line = f"  {code} {name}".rstrip()
+    price = data.get("price")
+    if price is not None:
+        line += f"：{_format_scalar(price)}"
+    chg = data.get("change_pct")
+    if isinstance(chg, (int, float)) and not isinstance(chg, bool):
+        sign = "+" if chg >= 0 else ""
+        line += f" ({sign}{chg}%)"
+    print(line)
+    for key in _QUOTE_EXTRA_KEYS:
+        value = data.get(key)
+        if _is_scalar(value):
+            print(f"    {key}: {_format_scalar(value)}")
+
+
+def _print_scalar_fields(data: dict[str, object]) -> None:
+    """未知 dict：标量字段带值；列表/嵌套 dict 折叠为键名。"""
+    printed = False
+    for key, value in data.items():
+        if _is_scalar(value):
+            print(f"  {key}: {_format_scalar(value)}")
+            printed = True
+    if not printed:
+        keys = list(data.keys())[:5]
+        print(f"  ({', '.join(keys)})")
+
+
+def _step_problem(sr: StepResult) -> str | None:
+    """步骤「成功但无数据」的显式中文原因；有数据返回 None。"""
+    data = sr.data
+    if isinstance(data, dict):
+        error = data.get("error")
+        if error:
+            hint = data.get("hint")
+            return f"{error}（{hint}）" if hint else str(error)
+        for key in ("indexes", "sectors", "stocks"):
+            if key in data:
+                items = data.get(key)
+                if isinstance(items, list) and not items:
+                    return "数据源不可达或该范围暂无数据"
+                return None
+        return None
+    if data is None or (isinstance(data, list) and not data):
+        return sr.error or "东财源不可达或该代码无数据"
+    return None
 
 
 # ---------- agent 流式对话 ----------
