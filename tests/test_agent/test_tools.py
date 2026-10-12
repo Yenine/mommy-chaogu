@@ -198,6 +198,10 @@ class TestGetBars:
         data = json.loads(result)
         assert len(data) == 1
         assert data[0]["close"] == 1680.0
+        assert data[0]["trade_date"] == "2026-07-01"
+        assert data[0]["adjustment"] == "forward"
+        assert data[0]["currency"] == "CNY"
+        assert data[0]["data_source"] is None
 
 
 class TestGetWatchlist:

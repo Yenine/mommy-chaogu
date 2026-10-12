@@ -266,6 +266,86 @@ class TestCompute:
         assert row["rank_prev"] is None
         assert row["rank_change"] is None
 
+    def test_internal_missing_date_does_not_stretch_complete_board_window(self) -> None:
+        """参考日期向量取 union 尾部；缺日板块被排除并说明原因。"""
+        adapter = FakeAdapter(
+            {
+                "BK1036": _closes("BK1036", ["100", "100", "100", "110", "121"]),
+                "BK0475": _closes("BK0475", ["100", "100", "110", "105", "110"]),
+                # 内部缺少 2026-07-03；不能让完整板块退回到更旧边界。
+                "BK1106": [
+                    _bar("BK1106", 0, "100"),
+                    _bar("BK1106", 1, "100"),
+                    _bar("BK1106", 3, "100"),
+                    _bar("BK1106", 4, "100"),
+                ],
+            }
+        )
+        service = SectorMomentumService(
+            adapter,
+            pool_fetcher=lambda **_: SectorPool(
+                boards=[
+                    SectorBoard("BK1036", "半导体", "industry"),
+                    SectorBoard("BK0475", "银行", "industry"),
+                    SectorBoard("BK1106", "创新药", "industry"),
+                ]
+            ),
+            sleep_fn=SleepRecorder(),
+        )
+
+        result = service.compute(days=2)
+
+        assert result["current_window_dates"] == ["2026-07-03", "2026-07-04", "2026-07-05"]
+        assert result["data_cutoff"] == "2026-07-05"
+        assert {row["code"] for row in result["ranking"]} == {"BK1036", "BK0475"}
+        assert result["ranking"][0]["return_pct"] == Decimal("21.00")
+        assert result["boards_missing"] == 1
+        assert result["board_exclusions"][0]["code"] == "BK1106"
+        assert result["board_exclusions"][0]["reason"] == "missing_reference_dates"
+        assert result["board_exclusions"][0]["missing_dates"] == ["2026-07-03"]
+
+    def test_old_cutoff_is_excluded_and_partial_previous_is_not_comparable(self) -> None:
+        """旧末日板块不拖回 cutoff；只有当前窗口的板块不制造上一窗排名。"""
+        adapter = FakeAdapter(
+            {
+                "BK1036": _closes("BK1036", ["100", "100", "100", "110", "121"]),
+                # 有完整当前窗口，但没有共同的上一窗口日期。
+                "BK0475": [
+                    _bar("BK0475", 2, "100"),
+                    _bar("BK0475", 3, "105"),
+                    _bar("BK0475", 4, "110"),
+                ],
+                # 有足够历史长度，但最后一天旧于参考 cutoff。
+                "BK1106": _closes("BK1106", ["100", "100", "105", "110"]),
+            }
+        )
+        service = SectorMomentumService(
+            adapter,
+            pool_fetcher=lambda **_: SectorPool(
+                boards=[
+                    SectorBoard("BK1036", "半导体", "industry"),
+                    SectorBoard("BK0475", "银行", "industry"),
+                    SectorBoard("BK1106", "创新药", "industry"),
+                ]
+            ),
+            sleep_fn=SleepRecorder(),
+        )
+
+        result = service.compute(days=2)
+
+        assert result["current_window_dates"] == ["2026-07-03", "2026-07-04", "2026-07-05"]
+        assert result["data_cutoff"] == "2026-07-05"
+        assert {row["code"] for row in result["ranking"]} == {"BK1036", "BK0475"}
+        partial = next(row for row in result["ranking"] if row["code"] == "BK0475")
+        assert partial["return_pct_prev"] is None
+        assert result["previous_comparable"] is False
+        assert all(
+            row["rank_prev"] is None and row["rank_change"] is None for row in result["ranking"]
+        )
+        old_cutoff = next(item for item in result["board_exclusions"] if item["code"] == "BK1106")
+        assert old_cutoff["reason"] == "missing_reference_dates"
+        assert old_cutoff["missing_dates"] == ["2026-07-05"]
+
     def test_no_bars_counts_missing_not_fake_signal(self) -> None:
         adapter = FakeAdapter({"BK1036": _closes("BK1036", ["100", "110", "121"], "半导体")})
         service = SectorMomentumService(
@@ -313,11 +393,10 @@ class TestCompute:
 
     def test_incremental_refetch_after_window_expiry_is_throttled(self, tmp_path: Path) -> None:
         """回归（评审问题）：warm cache + 节流窗口过期（次日重跑）时增量拉新真实
-        访问上游，必须限速——即使 CachedAdapter 此时 last_source 仍为 "cache"。
+        访问上游，必须限速，并把本次来源标为 network。
 
-        复现路径：cache/adapter.py 增量拉新分支访问 inner 后无条件回写
-        last_source="cache"（:392），按 last_source 判定会漏掉这条路径，
-        约 90 行业（含概念约 490）次请求零间隔连发。
+        该回归曾由增量拉新路径的来源状态覆盖触发；按 last_source 判定会漏掉
+        这条路径，约 90 行业（含概念约 490）次请求零间隔连发。
         """
         from mommy_chaogu.cache import CacheConfig, CachedMarketDataAdapter
 
@@ -355,9 +434,8 @@ class TestCompute:
         ).compute(days=2)
         # 增量拉新真实访问了上游（inner 再被调用一次）……
         assert inner.calls == 2
-        # ……且 last_source 仍是 "cache"（该路径的无条件回写）——恰好是
-        # 按 last_source 判定会漏掉的场景
-        assert cached.last_source == "cache"
+        # ……本次调用确实拿到网络结果，来源不能被旧的 cache 标签覆盖
+        assert cached.last_source == "network"
         # 但限速必须发生：计数器差值检测不依赖 last_source
         assert second_sleeps == [0.5]
         assert second["ranking"][0]["return_pct"] == Decimal("21.00")

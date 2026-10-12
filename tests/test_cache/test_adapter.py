@@ -388,6 +388,98 @@ def test_get_bars_persists_beijing_trade_date(
     assert len(in_range) == 1
 
 
+def test_bar_source_is_per_key_and_stale_status_survives_throttle(
+    store: CacheStore,
+) -> None:
+    """K 线来源不能被交错请求污染，失败后的同 key 节流仍标 stale。"""
+
+    class BarInner:
+        name = "bar-inner"
+
+        def __init__(self) -> None:
+            self.bars_by_code = {
+                "A": [_make_bar(datetime(2026, 1, 1, tzinfo=UTC), close="101")],
+                "B": [_make_bar(datetime(2026, 1, 1, tzinfo=UTC), close="202")],
+            }
+            self.fail_codes: set[str] = set()
+
+        def get_bars(self, code: str, **kwargs: object) -> list[Bar]:
+            if code in self.fail_codes:
+                raise ConnectionError(f"failed: {code}")
+            bars = self.bars_by_code.get(code, [])
+            return [
+                Bar(
+                    code=code,
+                    name=bar.name,
+                    interval=bar.interval,
+                    adjustment=bar.adjustment,
+                    timestamp=bar.timestamp,
+                    open=bar.open,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.close,
+                    volume=bar.volume,
+                    turnover=bar.turnover,
+                )
+                for bar in bars
+            ]
+
+    inner = BarInner()
+    cached = CachedMarketDataAdapter(
+        inner,
+        store,
+        CacheConfig(bar_fetch_interval_seconds=60),
+    )
+    key_a = f"bar:A:{BarInterval.D1.value}:{AdjustmentType.FORWARD.value}"
+    key_b = f"bar:B:{BarInterval.D1.value}:{AdjustmentType.FORWARD.value}"
+
+    assert cached.get_bars("A", interval=BarInterval.D1)  # fresh network
+    assert cached.last_source == "network"
+
+    # A previous network result must not label a no-cache B request as cache.
+    cached._last_fetch_attempt[key_b] = datetime.now(UTC)
+    assert cached.get_bars("B", interval=BarInterval.D1) == []
+    assert cached.last_source == "network_error"
+
+    # A fails after its cache is warm: old data is returned and stays stale in
+    # the throttle window, while B's independent cache request is plain cache.
+    inner.fail_codes.add("A")
+    cached._last_fetch_attempt[key_a] = datetime.now(UTC) - timedelta(seconds=120)
+    old_a = cached.get_bars("A", interval=BarInterval.D1)
+    assert old_a and old_a[0].close == Decimal("101")
+    assert cached.last_source == "stale_cache"
+    assert cached.get_bars("A", interval=BarInterval.D1)
+    assert cached.last_source == "stale_cache"
+
+    store.set_bar(
+        "B",
+        BarInterval.D1.value,
+        AdjustmentType.FORWARD.value,
+        "2026-01-01",
+        _bar_dict(datetime(2026, 1, 1, tzinfo=UTC), close="202") | {"code": "B"},
+    )
+    assert cached.get_bars("B", interval=BarInterval.D1)
+    assert cached.last_source == "cache"
+
+
+@pytest.mark.parametrize("empty_value", [None, []])
+def test_empty_bar_response_is_not_confirmed_empty(
+    store: CacheStore, empty_value: list[Bar] | None
+) -> None:
+    """空/None 可能是底层失败：不写空缓存，也不标 confirmed empty。"""
+
+    class EmptyInner:
+        name = "empty-inner"
+
+        def get_bars(self, code: str, **kwargs: object) -> list[Bar] | None:
+            return empty_value
+
+    cached = CachedMarketDataAdapter(EmptyInner(), store)
+    assert cached.get_bars("EMPTY", interval=BarInterval.D1) == []
+    assert cached.last_source == "network_error"
+    assert store.get_bars("EMPTY", BarInterval.D1.value, AdjustmentType.FORWARD.value) is None
+
+
 # ---------- 持久化 ----------
 
 

@@ -27,8 +27,10 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -38,6 +40,7 @@ from mommy_chaogu.market_data.rankings import SECTOR_FS
 from mommy_chaogu.market_data.types import AdjustmentType, Bar, BarInterval
 
 _log = logging.getLogger(__name__)
+_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
 
 _CLIST_URL = "http://push2.eastmoney.com/api/qt/clist/get"
 
@@ -195,7 +198,7 @@ class SectorMomentumService:
             - data_cutoff（全部已用 K 线的最新交易日，失败保旧时即数据截止日）
             - ranking: [{code, name, board_type, return_pct, return_pct_prev,
               rank, rank_prev, rank_change, bars_used, as_of}] 按 rank 升序；
-              rank_change = rank_prev - rank > 0 表示排名上升（资金流入方向）
+              rank_change = rank_prev - rank > 0 表示排名上升（不等同资金流入）
             - 板块池完全不可用时返回 {"error": ...}
         """
         window = max(MIN_DAYS, min(days, MAX_DAYS))
@@ -204,8 +207,9 @@ class SectorMomentumService:
         if isinstance(pool, dict):  # 板块池不可用（无枚举结果且无缓存回退）
             return pool
 
-        rows: list[dict[str, Any]] = []
+        candidates: list[tuple[SectorBoard, dict[date, Decimal], str]] = []
         missing = 0
+        exclusions: list[dict[str, Any]] = []
         for board in pool.boards:
             fetches_before = self._fetch_counter()
             try:
@@ -220,15 +224,99 @@ class SectorMomentumService:
                 bars = []
             self._throttle_after_fetch(fetches_before)
 
-            row = self._row_from_bars(board, bars or [], window)
+            closes = self._close_by_trade_date(bars or [])
+            if len(closes) < window + 1:
+                missing += 1
+                exclusions.append(
+                    {
+                        "code": board.code,
+                        "reason": "insufficient_bars",
+                        "bars_available": len(closes),
+                        "bars_required": window + 1,
+                    }
+                )
+                continue
+            ordered_bars = sorted(bars or [], key=lambda bar: self._bar_sort_key(bar.timestamp))
+            bar_name = next((bar.name for bar in reversed(ordered_bars) if bar.name), "")
+            candidates.append((board, closes, bar_name))
+
+        # Build one explicit reference vector from the union of valid dates.
+        # An intersection is subtly wrong here: one board's internal missing
+        # date disappears from the vector, turning an intended N-trading-day
+        # window into a longer calendar span for every other board.  The union
+        # tail uses the newest available market cutoff; each board must then
+        # contain the complete current vector to enter the ranking.  A stale
+        # board therefore gets an exclusion reason instead of moving the
+        # cutoff backwards.
+        all_dates: set[date] = set()
+        for _, closes, _ in candidates:
+            all_dates.update(closes)
+        reference_dates = (
+            sorted(all_dates)[-limit:] if len(all_dates) >= limit else sorted(all_dates)
+        )
+        current_dates = (
+            reference_dates[-(window + 1) :] if len(reference_dates) >= window + 1 else []
+        )
+        previous_dates = (
+            reference_dates[: window + 1] if len(reference_dates) >= 2 * window + 1 else []
+        )
+        rows: list[dict[str, Any]] = []
+        if not current_dates:
+            for board, _, _ in candidates:
+                missing += 1
+                exclusions.append(
+                    {
+                        "code": board.code,
+                        "reason": "no_reference_window",
+                        "bars_required": window + 1,
+                    }
+                )
+            candidates = []
+        for board, closes, bar_name in candidates:
+            missing_dates = [day.isoformat() for day in current_dates if day not in closes]
+            if missing_dates:
+                missing += 1
+                exclusions.append(
+                    {
+                        "code": board.code,
+                        "reason": "missing_reference_dates",
+                        "missing_dates": missing_dates,
+                        "reference_dates": [day.isoformat() for day in current_dates],
+                    }
+                )
+                continue
+            row = self._row_from_closes(
+                board,
+                closes,
+                window,
+                current_dates=current_dates,
+                previous_dates=(
+                    previous_dates if all(day in closes for day in previous_dates) else []
+                ),
+                name=bar_name,
+            )
             if row is None:
                 missing += 1
+                exclusions.append(
+                    {"code": board.code, "reason": "invalid_close_in_reference_window"}
+                )
                 continue
             rows.append(row)
 
-        self._assign_ranks(rows)
+        previous_comparable = bool(
+            previous_dates
+            and len(rows) == len(candidates)
+            and all(row["return_pct_prev"] is not None for row in rows)
+        )
+        self._assign_ranks(rows, compare_previous=previous_comparable)
         rows.sort(key=lambda r: r["rank"])
-        data_cutoff = max((r["as_of"] for r in rows), default=None)
+        data_cutoff = current_dates[-1].isoformat() if current_dates else None
+        if previous_comparable:
+            rank_note = "排名比较使用相同标的、相同北京交易日窗口"
+        elif rows:
+            rank_note = "上一窗口缺少共同日期或共同样本，rank_prev/rank_change 保留为空"
+        else:
+            rank_note = "没有可用的共同北京交易日窗口，未输出排名"
         return {
             "days": window,
             "include_concept": include_concept,
@@ -238,8 +326,15 @@ class SectorMomentumService:
             "boards_evaluated": len(rows),
             "boards_missing": missing,
             "data_cutoff": data_cutoff,
+            "reference_dates": [day.isoformat() for day in reference_dates],
+            "current_window_dates": [day.isoformat() for day in current_dates],
+            "previous_window_dates": [day.isoformat() for day in previous_dates],
+            "board_exclusions": exclusions,
             "ranking": rows,
-            "note": "探索性观察：板块多日相对强弱为历史序列计算（东财板块日 K），非回测结论",
+            "previous_comparable": previous_comparable,
+            "rank_comparison_note": rank_note,
+            "note": "探索性观察：板块多日相对强弱为历史序列计算（东财板块日 K），"
+            "排名变化不等同资金流入，也不是回测结论",
         }
 
     # ---------- 内部 ----------
@@ -292,9 +387,8 @@ class SectorMomentumService:
 
         按 ``stats_counters["fetches"]`` 前后差值判定，而不是 ``last_source``：
         CachedAdapter 增量拉新路径（有缓存且节流窗口过期，即次日重跑的自然
-        节奏）真实访问了上游，但结束时无条件回写 ``last_source = "cache"``
-        （cache/adapter.py:392）——last_source 在该路径上不是「是否访问过
-        上游」的可靠信号；计数器在两条路径（首拉 :342 / 增量 :371）上都在
+        节奏）过去曾让 ``last_source`` 不能可靠表示「是否访问过上游」；计数器
+        在首拉和增量路径上都在
         请求前自增、成败都计数，是可靠信号（失败请求同样消耗上游往返，
         也要限速）。无法感知计数的 adapter 保守起见总是限速。
         """
@@ -303,23 +397,78 @@ class SectorMomentumService:
             self._sleep_fn(self._board_pause)
 
     @staticmethod
-    def _row_from_bars(board: SectorBoard, bars: list[Bar], window: int) -> dict[str, Any] | None:
+    def _trade_date(timestamp: datetime) -> date:
+        """把 Bar 时间戳解释为 A 股北京交易日。"""
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=_TZ_BEIJING)
+        return timestamp.astimezone(_TZ_BEIJING).date()
+
+    @classmethod
+    def _close_by_trade_date(cls, bars: list[Bar]) -> dict[date, Decimal]:
+        """按北京交易日归并收盘价；同日重复值取时间较晚的一根。"""
+        ordered = sorted(bars, key=lambda bar: cls._bar_sort_key(bar.timestamp))
+        closes: dict[date, Decimal] = {}
+        for bar in ordered:
+            if bar.close > 0:
+                closes[cls._trade_date(bar.timestamp)] = bar.close
+        return closes
+
+    @staticmethod
+    def _bar_sort_key(timestamp: datetime) -> datetime:
+        if timestamp.tzinfo is None:
+            return timestamp.replace(tzinfo=_TZ_BEIJING)
+        return timestamp.astimezone(_TZ_BEIJING)
+
+    @classmethod
+    def _row_from_bars(
+        cls, board: SectorBoard, bars: list[Bar], window: int
+    ) -> dict[str, Any] | None:
         """由日 K 计算 N 日收益（当前窗口 + 上一窗口）；K 线不足不凑数。"""
-        closes = [(bar.timestamp, bar.close) for bar in bars if bar.close > 0]
-        if len(closes) < window + 1:
+        closes = cls._close_by_trade_date(bars)
+        dates = sorted(closes)
+        if len(dates) < window + 1:
             return None
-        end_ts, end = closes[-1]
-        _, boundary = closes[-(window + 1)]
+        current_dates = dates[-(window + 1) :]
+        previous_dates = dates[-(2 * window + 1) : -window] if len(dates) >= 2 * window + 1 else []
+        ordered = sorted(bars, key=lambda bar: cls._bar_sort_key(bar.timestamp))
+        bar_name = next((bar.name for bar in reversed(ordered) if bar.name), "")
+        return cls._row_from_closes(
+            board,
+            closes,
+            window,
+            current_dates=current_dates,
+            previous_dates=previous_dates,
+            bars_used=len(dates),
+            name=bar_name,
+        )
+
+    @classmethod
+    def _row_from_closes(
+        cls,
+        board: SectorBoard,
+        closes: dict[date, Decimal],
+        window: int,
+        *,
+        current_dates: list[date],
+        previous_dates: list[date],
+        bars_used: int | None = None,
+        name: str = "",
+    ) -> dict[str, Any] | None:
+        if len(current_dates) != window + 1:
+            return None
+        end = closes[current_dates[-1]]
+        boundary = closes[current_dates[0]]
         return_pct = _pct_change(end, boundary)
         if return_pct is None:
             return None
 
         return_pct_prev: Decimal | None = None
-        if len(closes) >= 2 * window + 1:
-            _, prev_start = closes[-(2 * window + 1)]
-            return_pct_prev = _pct_change(boundary, prev_start)
+        if len(previous_dates) == window + 1:
+            prev_start = closes[previous_dates[0]]
+            prev_end = closes[previous_dates[-1]]
+            return_pct_prev = _pct_change(prev_end, prev_start)
 
-        name = board.name or (bars[-1].name if bars and bars[-1].name else board.code)
+        name = board.name or name or board.code
         return {
             "code": board.code,
             "name": name,
@@ -329,18 +478,22 @@ class SectorMomentumService:
             "rank": 0,
             "rank_prev": None,
             "rank_change": None,
-            "bars_used": len(closes),
-            "as_of": end_ts.date().isoformat(),
+            "bars_used": bars_used if bars_used is not None else len(closes),
+            "as_of": current_dates[-1].isoformat(),
         }
 
     @staticmethod
-    def _assign_ranks(rows: list[dict[str, Any]]) -> None:
-        """当前窗口与上一窗口分别按收益降序排名；rank_change > 0 = 排名上升。"""
+    def _assign_ranks(rows: list[dict[str, Any]], *, compare_previous: bool = True) -> None:
+        """当前窗口排名；仅在样本池完整一致时计算上一窗口变化。"""
         for rank, row in enumerate(
             sorted(rows, key=lambda r: r["return_pct"], reverse=True), start=1
         ):
             row["rank"] = rank
+        if not compare_previous:
+            return
         with_prev = [row for row in rows if row["return_pct_prev"] is not None]
+        if len(with_prev) != len(rows):
+            return
         for rank_prev, row in enumerate(
             sorted(with_prev, key=lambda r: r["return_pct_prev"], reverse=True), start=1
         ):

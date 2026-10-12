@@ -14,9 +14,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mommy_chaogu.backtest.costs import (
     DEFAULT_COSTS,
@@ -31,6 +33,27 @@ from mommy_chaogu.cache.store import CacheStore
 SPIKE_THRESHOLD = Decimal("0.0005")
 
 NO_COSTS_LABEL = "未扣减交易成本"
+_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
+
+
+def _trade_date_from_timestamp(value: Any) -> str:
+    """Return an A-share trading date from a cached bar timestamp.
+
+    Cached daily bars from market-data adapters use aware UTC timestamps at
+    Beijing midnight.  Date-only and naive values remain compatible with the
+    historic cache representation and are interpreted as Beijing wall time.
+    """
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        raw = str(value)
+        try:
+            timestamp = datetime.fromisoformat(raw)
+        except ValueError:
+            return raw[:10]
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=_TZ_BEIJING)
+    return timestamp.astimezone(_TZ_BEIJING).date().isoformat()
 
 
 @dataclass
@@ -89,8 +112,7 @@ class BacktestEngine:
             return None
         bar_by_date: dict[str, dict[str, Any]] = {}
         for b in bars:
-            ts = b["timestamp"]
-            date = ts[:10]  # "2026-06-01T..." → "2026-06-01"
+            date = _trade_date_from_timestamp(b["timestamp"])
             if start_date <= date <= end_date:
                 bar_by_date[date] = b
 
@@ -207,7 +229,11 @@ class BacktestEngine:
             data["mcap_as_of"] for data in all_data.values() if data.get("mcap_as_of") is not None
         ]
         mcap_as_of = min(mcap_dates).strftime("%Y-%m-%d") if mcap_dates else ""
-        caveats: list[str] = []
+        caveats: list[str] = [
+            "探索性信号收益观察：按日资金流信号与日 K 持有期收益汇总，"
+            "不是逐日资金占用、净值曲线或真实组合回测",
+            "未验证资金流的可见时间与同日收盘成交可行性，收益不代表可执行收益",
+        ]
         if mcap_as_of:
             caveats.append(
                 f"流通市值取自 {mcap_as_of} 的报价缓存：ratio=当日主力净流入÷当前市值，"

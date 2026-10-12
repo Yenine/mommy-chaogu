@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import TypedDict, cast
 
 from mommy_chaogu.market_data import Bar, OrderBook
+from mommy_chaogu.market_data.time_utils import market_trade_date
 from mommy_chaogu.monitor import Snapshot, SnapshotRow
 from mommy_chaogu.portfolio import PortfolioStore
 from mommy_chaogu.portfolio.models import Position, PositionAdjustment
@@ -90,8 +91,12 @@ def snapshot_to_out(snapshot: Snapshot) -> SnapshotOut:
 
 def bar_to_out(bar: Bar) -> BarOut:
     """Bar → BarOut（adapter 层已统一为 market_data.types.Bar）。"""
+    trade_date = market_trade_date(bar.timestamp, bar.code)
     return BarOut(
         timestamp=bar.timestamp,
+        trade_date=trade_date,
+        adjustment=bar.adjustment.value,
+        currency=bar.turnover.currency,
         open=bar.open,
         high=bar.high,
         low=bar.low,

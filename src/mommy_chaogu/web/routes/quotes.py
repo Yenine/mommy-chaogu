@@ -75,6 +75,16 @@ def get_bars(
         raise HTTPException(status_code=503, detail="当前没有可用 K 线数据") from exc
     if not bars:
         raise HTTPException(status_code=503, detail="当前没有可用 K 线数据")
+    adjustments = {bar.adjustment.value for bar in bars}
+    currencies = {bar.turnover.currency for bar in bars}
+    if len(adjustments) > 1 or len(currencies) > 1:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"拒绝混合 K 线口径：复权={sorted(adjustments)}，"
+                f"成交额币种={sorted(currencies)}；请按单一口径重试"
+            ),
+        )
     return [bar_to_out(b) for b in bars]
 
 
@@ -100,7 +110,12 @@ def get_today_money_flow(
     注意：efinance get_today_bill 返回的每条数据是到该时刻的**累计值**，
     不是增量。最后一条即为当日全天累计。
     """
-    flows = adapter.get_today_money_flow(code)
+    try:
+        flows = adapter.get_today_money_flow(code)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="当日资金流不可用") from exc
+    if not flows:
+        raise HTTPException(status_code=503, detail="当日资金流不可用（上游无数据或请求失败）")
     items = [
         {
             "timestamp": f.timestamp.isoformat(),
@@ -139,7 +154,12 @@ def get_history_money_flow(
     - items: 每日资金流列表（按日期升序）
     - cumulative: 整个时间段累计
     """
-    flows = adapter.get_history_money_flow(code, days=days)
+    try:
+        flows = adapter.get_history_money_flow(code, days=days)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="历史资金流不可用") from exc
+    if not flows:
+        raise HTTPException(status_code=503, detail="历史资金流不可用（上游无数据或请求失败）")
     items = [
         {
             "timestamp": f.timestamp.isoformat(),

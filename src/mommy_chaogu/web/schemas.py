@@ -56,6 +56,9 @@ class BarOut(BaseModel):
     """K 线一根。"""
 
     timestamp: datetime
+    trade_date: str
+    adjustment: str
+    currency: str
     open: Decimal
     high: Decimal
     low: Decimal

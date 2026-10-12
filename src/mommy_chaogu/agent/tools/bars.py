@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from mommy_chaogu.agent.tools.base import (
@@ -14,6 +15,7 @@ from mommy_chaogu.agent.tools.base import (
 )
 from mommy_chaogu.cache.store import CacheStore
 from mommy_chaogu.market_data.rankings import INDEX_CODES, INDEX_LIST, resolve_index_symbol
+from mommy_chaogu.market_data.time_utils import market_trade_date
 from mommy_chaogu.market_data.types import BarInterval
 from mommy_chaogu.services.intraday_service import IntradayService
 
@@ -143,6 +145,11 @@ MAX_BARS_LIMIT = 120
 MAX_BACKFILL_DAYS = 365
 
 
+def _trade_date(timestamp: datetime, code: str) -> str:
+    """Bar timestamp → market date for the supported A-share/US code forms."""
+    return market_trade_date(timestamp, code)
+
+
 def _handle_get_bars(ctx: ToolContext, args: dict[str, Any]) -> str:
     code = str(args.get("code") or "").strip()
     if not code:
@@ -156,6 +163,8 @@ def _handle_get_bars(ctx: ToolContext, args: dict[str, Any]) -> str:
     limit = _clamp_int(args.get("limit", 30), 30, 1, MAX_BARS_LIMIT)
     interval = BarInterval(interval_str)
     bars = ctx.adapter.get_bars(code, interval=interval, limit=limit) or []
+    source = getattr(ctx.adapter, "last_source", "")
+    data_source = source if isinstance(source, str) and source else None
     if not bars:
         # 空结果必须显式说明是"取不到"而不是"这只票今天没成交"，
         # 否则宿主 Agent 会把工具失败当成零成交事实。
@@ -171,6 +180,10 @@ def _handle_get_bars(ctx: ToolContext, args: dict[str, Any]) -> str:
                 "code": b.code,
                 "name": b.name,
                 "timestamp": b.timestamp.isoformat(),
+                "trade_date": _trade_date(b.timestamp, b.code),
+                "adjustment": b.adjustment.value,
+                "currency": b.turnover.currency,
+                "data_source": data_source,
                 "open": float(b.open),
                 "high": float(b.high),
                 "low": float(b.low),
@@ -228,6 +241,8 @@ def _handle_get_index_bars(ctx: ToolContext, args: dict[str, Any]) -> str:
     interval = BarInterval(args.get("interval", "1d"))
     limit = _clamp_int(args.get("limit", 30), 30, 1, MAX_BARS_LIMIT)
     bars = ctx.adapter.get_bars(code, interval=interval, limit=limit)
+    source = getattr(ctx.adapter, "last_source", "")
+    data_source = source if isinstance(source, str) and source else None
     subject = f"{name} {code}"
     if not bars:
         return _json(
@@ -251,6 +266,10 @@ def _handle_get_index_bars(ctx: ToolContext, args: dict[str, Any]) -> str:
                     "code": b.code,
                     "name": b.name,
                     "timestamp": b.timestamp.isoformat(),
+                    "trade_date": _trade_date(b.timestamp, b.code),
+                    "adjustment": b.adjustment.value,
+                    "currency": b.turnover.currency,
+                    "data_source": data_source,
                     "open": float(b.open),
                     "high": float(b.high),
                     "low": float(b.low),

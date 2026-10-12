@@ -311,7 +311,7 @@ _CLOSED_LOOP_SUMMARY = """\
 1. 技术面发现：有没有"形"——是否突破前 20 日高点、收盘是否站上 MA20。
    依据在 check_kline_signal 的 evidence 字段（hit/high_20/ma20/close/bars_used），
    未命中也要写出数值（如"20 日高点 = X 元，最新完成日 K 收盘 Y 元，未突破"）；
-   K 线信号按"未复权口径"解读（note 字段有标注）
+   K 线信号沿用返回 K 线的实际复权口径；复权语义及跨口径可比性未核验（note 字段有标注）
 2. 信息面解释：市场为何这样交易它——结合 check_earnings_catalyst 的公告标题
    （是否有业绩/财报类公告）与 name/pe/roe 做证据聚合，不下确定性结论
 3. 基本面持续性：PE / ROE 概况能否支撑行情延续；数据缺失就明说缺失

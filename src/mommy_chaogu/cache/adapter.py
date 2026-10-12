@@ -101,7 +101,10 @@ class CachedMarketDataAdapter:
             "miss": 0,
         }
         # 最近一次数据来源（供调用方感知数据新鲜度）
-        self.last_source: str = ""  # "network", "network_empty", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
+        self.last_source: str = ""  # "network", "network_empty", "network_error", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
+        # K 线来源按请求 key 隔离；last_source 是历史兼容的展示字段，不能
+        # 作为另一个 code/口径请求的状态存储。
+        self._bar_last_source: dict[str, str] = {}
         # 最近一次资金流数据所属交易日（北京时区 YYYY-MM-DD）——跨日 stale 时标注给调用方
         self.last_source_trade_date: str = ""
 
@@ -397,11 +400,21 @@ class CachedMarketDataAdapter:
                     _log.error("cache set_bar failed: %s", e)
 
         cached_bars = _read_cache()
+        source_set = False
+
+        def _set_bar_source(source: str) -> None:
+            """Publish this request's source without inheriting another key."""
+            nonlocal source_set
+            source_set = True
+            self._bar_last_source[key] = source
+            self.last_source = source
 
         if not cached_bars:
             # 该区间内无缓存 → 尝试拉新（节流窗口内不重复打上游）
             if not self._should_fetch(key, fetch_window):
-                self.last_source = "cache"
+                # 节流命中但仍没有缓存时，不能把空结果称为 cache；底层
+                # 失败/空响应与尚未确认的无数据在此契约下都属于不可用。
+                _set_bar_source("network_error")
                 return []
             self._mark_fetched(key)
             self.stats_counters["fetches"] += 1
@@ -418,16 +431,22 @@ class CachedMarketDataAdapter:
             except Exception as e:
                 self.stats_counters["fetch_fail"] += 1
                 _log.warning("fetch bars(%s) failed: %s", code, e)
-                self.last_source = "cache"
+                _set_bar_source("network_error")
                 return []
 
             # 底层 adapter 可能违反 list 契约返回 None → 当作无数据
             if fresh is None:
-                self.last_source = "cache"
+                _set_bar_source("network_error")
+                return []
+
+            # 空列表无法区分「确认无数据」和底层多源失败；不要把它
+            # 暴露成 network_empty，也不要写入或覆盖任何缓存。
+            if not fresh:
+                _set_bar_source("network_error")
                 return []
 
             _persist(fresh)
-            self.last_source = "network"
+            _set_bar_source("network")
             return fresh
 
         # 区间内有缓存 → 节流窗口外尝试增量拉新，拉新后重读缓存
@@ -444,7 +463,7 @@ class CachedMarketDataAdapter:
                     limit=limit,
                 )
                 self.stats_counters["fetch_ok"] += 1
-                if fresh is not None:
+                if fresh:
                     _persist(fresh)
                     refreshed = _read_cache()
                     # 分钟周期防坍缩兜底：重读缓存若仍少于 fresh（如部分日
@@ -463,12 +482,25 @@ class CachedMarketDataAdapter:
                         ]
                     elif refreshed:
                         cached_bars = refreshed
+                    _set_bar_source("network")
+                else:
+                    # 空/None 不能证明上游确认无数据；本次继续返回旧缓存。
+                    _set_bar_source("stale_cache")
             except Exception as e:
                 _log.warning("refetch bars(%s) failed (using cache): %s", code, e)
+                _set_bar_source("stale_cache")
 
         # 从缓存构造 Bar 列表
         self.stats_counters["hits"] += 1
-        self.last_source = "cache"
+        if not source_set:
+            # 同一请求 key 在上一次拉新失败后进入节流窗口时，继续把旧
+            # 数据标为 stale；另一个 code/口径的来源不会污染本次请求。
+            previous_source = self._bar_last_source.get(key)
+            _set_bar_source("stale_cache" if previous_source == "stale_cache" else "cache")
+        else:
+            # Keep the source from this key's refetch attempt visible even if
+            # another adapter method ran between the fetch and return.
+            self.last_source = self._bar_last_source[key]
 
         bars: list[Bar] = []
         for bar_dict in cached_bars:
@@ -709,6 +741,8 @@ class CachedMarketDataAdapter:
                 label = "实时数据"
         elif self.last_source == "network_empty":
             label = "实时数据（当日无资金流数据）"
+        elif self.last_source == "network_error":
+            label = "行情源不可用（无可用缓存）"
         elif self.last_source == "cache":
             label = "本地缓存"
         elif self.last_source in ("stale_cache", "stale_snapshot"):

@@ -1,7 +1,7 @@
-"""组合层面回测：把一组已验证的预测当作一个组合来模拟，输出整体赚不赚钱。
+"""交易级简化收益汇总：把一组已验证的预测按交易记录顺序汇总。
 
 之前的 :mod:`backtest.engine` / :mod:`backtest.scoring` 只看「单条预测准不准」，
-本模块再上一层，回答「按这批信号操作，组合净值为多少」。
+本模块提供便于筛查的交易级收益观察，不等同逐日持仓组合回测。
 
 交易规则（A 股约束）:
 
@@ -12,15 +12,15 @@
 资金分配（``position_size``）:
 
 - ``"equal"``: 每个实际开仓信号分到 ``initial_capital / 实际交易笔数`` 的
-  等额资金。**注意**：总笔数在回看全样本后才知道，属于前视——结果偏乐观，
-  返回值 ``caveats`` 会显式标注。
-- ``"sequential"``: 按日期顺序执行，每笔开仓投入**当时净值**的固定比例
-  ``sequential_fraction``（默认 10%）。只依赖已发生的信息，无前视。
+  等额资金。**注意**：总笔数在回看全样本后才知道，属于前视；返回值
+  ``caveats`` 会显式标注。
+- ``"sequential"``: 按日期顺序把每笔收益按**当时汇总净值**的固定比例
+  ``sequential_fraction``（默认 10%）计入；仍未模拟逐日持仓与退出日期。
 
 资金金额（initial_capital / equity / P&L）全程 :class:`~decimal.Decimal`，
-输出时 quantize 到分。净值曲线按信号 ``date`` 排序后顺序累加每笔 P&L，
-用于计算最大回撤；夏普比率复用 :mod:`backtest.metrics` 的统一口径
-（无风险利率 2%、ddof=1）。交易成本走 :func:`backtest.costs.apply_costs`。
+输出时 quantize 到分。观察曲线按信号 ``date`` 排序后顺序累加每笔 P&L；
+它不代表逐日组合净值，最大回撤和夏普比率也不具备严格组合指标含义。
+交易成本走 :func:`backtest.costs.apply_costs`。
 """
 
 from __future__ import annotations
@@ -33,14 +33,27 @@ from mommy_chaogu.backtest.costs import apply_costs
 from mommy_chaogu.backtest.metrics import drawdown_fraction, sharpe_ratio
 from mommy_chaogu.backtest.scoring import score_direction
 
-__all__ = ["EQUAL_LOOKAHEAD_CAVEAT", "PortfolioBacktester", "PortfolioResult"]
+__all__ = [
+    "EQUAL_LOOKAHEAD_CAVEAT",
+    "EXECUTION_TIMING_CAVEAT",
+    "SIMPLIFIED_SUMMARY_CAVEAT",
+    "PortfolioBacktester",
+    "PortfolioResult",
+]
 
 _TWO_PLACES = Decimal("0.01")
 
 EQUAL_LOOKAHEAD_CAVEAT = (
-    "equal 等权分配按全样本交易笔数切分初始资金（前视）：实盘按日期滚动执行时"
-    "无法预知总笔数，结果偏乐观。无前视口径用 position_size='sequential'。"
+    "equal 等权分配按全样本交易笔数切分初始资金（前视）：按日期滚动执行时"
+    "无法预知总笔数，需把该资金分配限制纳入解释。"
 )
+
+SIMPLIFIED_SUMMARY_CAVEAT = (
+    "交易级简化收益汇总：未按逐日持仓锁定资金，未模拟 exit_date 重叠、资金占用"
+    "或可复用现金；equity、最大回撤和夏普仅为观察值，不是严格组合指标"
+)
+
+EXECUTION_TIMING_CAVEAT = "未验证信号产生、可见时间、成交与到期平仓时点，结果不代表可执行收益"
 
 
 def _q2(value: Decimal) -> float:
@@ -50,7 +63,7 @@ def _q2(value: Decimal) -> float:
 
 @dataclass
 class PortfolioResult:
-    """组合回测汇总结果。
+    """交易级简化收益汇总结果。
 
     Attributes:
         caveats: 口径警示（如 equal 分配的前视标注），调用方应展示给用户。
@@ -66,7 +79,7 @@ class PortfolioResult:
 
 
 class PortfolioBacktester:
-    """对一组已验证预测模拟组合操作，给出组合层面的净值 / 回撤 / 夏普。"""
+    """对预测记录生成交易级收益、胜率和观察性净值序列。"""
 
     def __init__(self, default_horizon: int = 5) -> None:
         """单笔交易的默认持有天数，仅用于夏普年化系数。
@@ -99,7 +112,7 @@ class PortfolioBacktester:
             initial_capital: 初始资金（元）；接受 Decimal / float / int，
                 内部统一转 Decimal 精确累加
             position_size: 资金分配策略——``"equal"``（等权，含前视，见模块
-                docstring）或 ``"sequential"``（按当时净值固定比例，无前视）
+                docstring）或 ``"sequential"``（按汇总净值固定比例）
             sequential_fraction: ``"sequential"`` 模式下每笔投入当时净值的
                 比例（默认 0.1）
 
@@ -112,7 +125,7 @@ class PortfolioBacktester:
             )
 
         capital = Decimal(str(initial_capital))
-        caveats: list[str] = []
+        caveats: list[str] = [SIMPLIFIED_SUMMARY_CAVEAT, EXECUTION_TIMING_CAVEAT]
         if position_size == "equal":
             caveats.append(EQUAL_LOOKAHEAD_CAVEAT)
 
@@ -153,7 +166,7 @@ class PortfolioBacktester:
             if position_size == "equal":
                 allocated = equal_alloc
             else:
-                # sequential：每笔投入当时净值的固定比例，只依赖已发生信息
+                # sequential：每笔按当前汇总净值的固定比例计入观察值。
                 allocated = equity * Decimal(str(sequential_fraction))
             pnl = allocated * Decimal(str(t["net_return_pct"])) / Decimal("100")
             equity += pnl

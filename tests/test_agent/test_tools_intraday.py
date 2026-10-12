@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -94,6 +95,8 @@ class TestGetIntradayProfile:
 
         assert data["code"] == CODE
         assert data["trade_date"] == "2026-09-30"
+        assert data["adjustment"] == "none"
+        assert data["currency"] == "CNY"
         # 5 分钟 K 数据入口（M5、有限根数）
         assert adapter.calls[-1]["interval"] == BarInterval.M5
         # 三段齐备
@@ -110,6 +113,18 @@ class TestGetIntradayProfile:
         data = json.loads(registry.call("get_intraday_profile", {"code": "300750"}))
         assert "error" in data
         assert "vwap" not in data
+
+    def test_mixed_adjustment_or_currency_is_rejected(self) -> None:
+        bars = [
+            _m5_bar(9, 30, "101", 100),
+            replace(_m5_bar(9, 35, "102", 100), adjustment=AdjustmentType.FORWARD),
+        ]
+        registry = ToolRegistry(ToolContext(adapter=FakeAdapter(bars)))
+
+        data = json.loads(registry.call("get_intraday_profile", {"code": CODE}))
+
+        assert "error" in data
+        assert "混合" in data["error"]
 
 
 # ---------- backfill_history interval 透传 ----------

@@ -16,6 +16,7 @@ from typing import Any
 from rich.markup import escape
 from textual.widgets import Static
 
+from mommy_chaogu.market_data.time_utils import market_trade_date
 from mommy_chaogu.tui.services.colors import color
 from mommy_chaogu.tui.services.formatting import (
     change_arrow,
@@ -140,13 +141,39 @@ def bars_card(bars: list[dict[str, Any]], theme: str = "dark") -> Static:
     code = _text(rows[-1].get("code", "")) if rows else ""
     title = f"[bold cyan]{name}（{code}）近期走势[/]" if name or code else "[bold cyan]近期走势[/]"
     lines = [title, "  [dim]日期          收盘      涨跌      成交量[/]"]
+    adjustments = {str(row.get("adjustment")) for row in rows if row.get("adjustment")}
+    currencies = {str(row.get("currency")) for row in rows if row.get("currency")}
+    sources = {str(row.get("data_source")) for row in rows if row.get("data_source")}
+    if "stale_cache" in sources:
+        lines.append("  [yellow]⚠ 拉新失败，当前显示旧缓存，数据可能过期[/]")
+    if len(adjustments) > 1:
+        lines.append("  [yellow]⚠ 当前卡片包含混合复权口径，涨跌不可直接比较[/]")
+    elif adjustments:
+        lines.append(f"  [dim]复权口径：{_text(next(iter(adjustments)))}[/]")
+    if len(currencies) > 1:
+        lines.append("  [yellow]⚠ 当前卡片包含混合成交额币种，请分口径解读[/]")
+    elif currencies:
+        lines.append(f"  [dim]成交额币种：{_text(next(iter(currencies)))}[/]")
     for b in rows:
-        ts = _text(str(b.get("timestamp", ""))[:10])
+        ts = _text(_bar_trade_date(b))
         close = format_price(b.get("close"))
         pct = b.get("change_pct")
         vol = format_amount(b.get("volume"))
         lines.append(f"  {ts}  {close:>8}  {_styled_change(pct, theme)}  {vol:>8}")
     return _card(lines, classes=f"{CARD_CLASS} bars-card")
+
+
+def _bar_trade_date(bar: dict[str, Any]) -> str:
+    """展示行情的交易日，优先使用数据源已判定的 market date。"""
+    explicit = bar.get("trade_date")
+    if explicit:
+        return str(explicit)
+    raw = str(bar.get("timestamp", ""))
+    try:
+        timestamp = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw[:10]
+    return market_trade_date(timestamp, str(bar.get("code", "")))
 
 
 # ---------------------------------------------------------------------------
