@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from mommy_chaogu.tui.services.formatting import format_elapsed
+
 # 姿势 → 两行颜文字（上：表情，下：道具），宽度控制在 12 列内
 FACES: dict[str, tuple[str, str]] = {
     "hero": ("(◕‿◕)ゞ", " ╰ 妈咪 ╯"),
@@ -96,12 +98,15 @@ def mascot_state(
 ) -> MascotState:
     """根据当前活动算出妈咪的姿势、台词、副标题与状态点颜色。"""
     if busy:
+        if event == "stop" and event_age_s < EVENT_HOLD_S:
+            # Esc 后 worker 还没收尾（例如卡在 LLM 请求里）：立刻给出中断反应
+            return MascotState("wait", LINES["wait"], "正在中断 · 等当前步骤收尾", "muted")
         if event == "fail" and event_age_s < FAIL_HOLD_S:
             return MascotState("huh", LINES["huh"], "失败的步骤，妈咪在想办法", "danger")
         if running:
             pose = TOOL_POSES.get(running[-1], "research")
             line = LINES[pose] + (f" ×{len(running)}" if len(running) > 1 else "")
-            sub = " · ".join(running) + f" · {_dur(running_for_s)}"
+            sub = " · ".join(running) + f" · {format_elapsed(int(running_for_s * 1000))}"
             return MascotState(pose, line, sub, "warning")
         return MascotState("think", LINES["think"], "规划下一步", "warning")
     if event == "win" and event_age_s < EVENT_HOLD_S:
@@ -117,7 +122,3 @@ def mascot_state(
     if idle_s > COFFEE_AFTER_S:
         return MascotState("coffee", LINES["coffee"], "空闲中", "muted")
     return MascotState("hero", LINES["hero"], "就绪 · 输入 / 查看命令", "success")
-
-
-def _dur(seconds: float) -> str:
-    return f"{seconds * 1000:.0f}ms" if seconds < 1 else f"{seconds:.1f}s"

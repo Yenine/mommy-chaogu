@@ -27,6 +27,7 @@ from textual.timer import Timer
 from textual.widgets import Static
 
 from mommy_chaogu.tui.services.colors import color, current_theme
+from mommy_chaogu.tui.services.formatting import format_elapsed as format_elapsed  # 兼容旧导入路径
 
 # 工具名 → 中文显示名（覆盖 agent/tools/ 的全部工具）
 TOOL_DISPLAY_NAMES: dict[str, str] = {
@@ -120,13 +121,6 @@ def format_result_digest(result: str, max_len: int = 60) -> str:
     first_line = stripped.splitlines()[0] if stripped else "完成"
     collapsed = " ".join(first_line.split())
     return truncate_at_word(collapsed, max_len)
-
-
-def format_elapsed(elapsed_ms: int) -> str:
-    """耗时格式化（dexter formatDuration）。"""
-    if elapsed_ms < 1000:
-        return f"{elapsed_ms}ms"
-    return f"{elapsed_ms / 1000:.1f}s"
 
 
 def _fmt_money(value: Any) -> str:

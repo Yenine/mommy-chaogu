@@ -204,7 +204,7 @@ class TestTimeline:
                 # 轮次头 #1 + 用户问题
                 heads = side.query(".tl-turn")
                 assert len(heads) == 1
-                assert "#1" in str(heads[0].content)  # type: ignore[attr-defined]
+                assert heads[0].render().plain.startswith("#1 ")  # type: ignore[attr-defined]
                 # 点击展开详情（参数 / 结果）
                 row = side.query(TimelineRow).first()
                 row.toggle()
@@ -376,7 +376,7 @@ class TestSlashMenu:
 
         _run(_test())
 
-    def test_escape_closes_menu_only(self) -> None:
+    def test_escape_on_slash_menu_discards_partial_command(self) -> None:
         from mommy_chaogu.tui.views.chat import ChatView
         from mommy_chaogu.tui.widgets.hint_bar import HintBar
 
@@ -393,7 +393,8 @@ class TestSlashMenu:
                 await pilot.press("escape")
                 await pilot.pause()
                 assert hint.mode == "default"
-                assert prompt.value == "/t"  # type: ignore[attr-defined]
+                # 半截命令被放弃：随后 Enter 不会执行 /t，↑ 翻历史也不会覆盖它
+                assert prompt.value == ""  # type: ignore[attr-defined]
 
         _run(_test())
 
@@ -412,3 +413,276 @@ class TestSlashMenu:
                 assert "enter 执行" in content
 
         _run(_test())
+
+    def test_escape_on_stock_menu_keeps_sentence(self) -> None:
+        from mommy_chaogu.tui.views.chat import ChatView
+        from mommy_chaogu.tui.widgets.hint_bar import HintBar
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test() as pilot:
+                chat = app.query_one(ChatView)
+                prompt = chat.query_one("#prompt")
+                prompt.value = "分析一下 @茅"  # type: ignore[attr-defined]
+                await pilot.pause()
+                assert chat.query_one(HintBar).mode == "stock-suggestions"
+                await pilot.press("escape")
+                await pilot.pause()
+                assert chat.query_one(HintBar).mode == "default"
+                assert prompt.value == "分析一下 @茅"  # type: ignore[attr-defined]
+
+        _run(_test())
+
+
+# ---------------------------------------------------------------------------
+# 审核修复回归
+# ---------------------------------------------------------------------------
+
+
+class _GatedAgent:
+    """开始一个工具后阻塞，直到 gate 放行或整轮被取消。"""
+
+    def __init__(self, honor_cancel: bool = True) -> None:
+        self.gate = threading.Event()
+        self.honor_cancel = honor_cancel  # False：模拟卡在 LLM 请求里、迟迟不响应取消
+
+    def chat(self, message, history=None, callbacks=None):  # type: ignore[no-untyped-def]
+        callbacks.on_tool_call("get_quote", {"code": "600519"})
+        while not self.gate.wait(0.05):
+            if self.honor_cancel and callbacks.cancel_event.is_set():
+                return _resp("", interrupted=True)
+        if callbacks.cancel_event.is_set():
+            return _resp("", interrupted=True)
+        callbacks.on_tool_result("get_quote", True, 100, "{}")
+        return _resp()
+
+
+class TestReviewFixes:
+    def test_panel_follows_live_resize(self) -> None:
+        """缩窄到 100 列以下即收起，拉宽后恢复（用的是 Resize 事件里的新尺寸）。"""
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=(120, 30)) as pilot:
+                side = app.query_one(SidePanel)
+                assert side.display
+                await pilot.resize_terminal(80, 30)
+                await pilot.pause()
+                assert not side.display
+                await pilot.resize_terminal(120, 30)
+                await pilot.pause()
+                assert side.display
+
+        _run(_test())
+
+    def test_clear_mid_turn_resets_mascot(self) -> None:
+        from mommy_chaogu.tui.services.mascot import mascot_state
+        from mommy_chaogu.tui.views.chat import ChatView
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        agent = _GatedAgent()
+
+        async def _test() -> None:
+            app = _app_with(agent)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                chat = app.query_one(ChatView)
+                app.handle_chat_message("茅台")
+                assert await _wait_for(pilot, lambda: side.stats()["running"] == 1)
+                assert side._is_busy
+                app.run_slash("clear")
+                assert await _wait_for(pilot, lambda: side.stats()["total"] == 0)
+                assert not side._is_busy
+                assert not chat._busy
+                assert mascot_state(busy=side._is_busy, running=[]).pose == "hero"
+                agent.gate.set()
+
+        _run(_test())
+
+    def test_workflow_crash_settles_running_step(self) -> None:
+        from mommy_chaogu.tui.app import MommyTuiApp
+        from mommy_chaogu.tui.services.bootstrap import FakeServices
+        from mommy_chaogu.tui.views.chat import ChatView
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        services = FakeServices.create()
+        workflow = SimpleNamespace(
+            description="早盘简报", steps=[SimpleNamespace(display_name="大盘指数")]
+        )
+        services.agent.route = lambda text: SimpleNamespace(matched=True, workflow=workflow)  # type: ignore[method-assign]
+
+        def _execute(route, text, on_start, on_done, is_cancelled=None):  # type: ignore[no-untyped-def]
+            on_start("大盘指数")
+            raise RuntimeError("数据源炸了")
+
+        services.agent.execute_workflow = _execute  # type: ignore[method-assign]
+
+        async def _test() -> None:
+            app = MommyTuiApp(services=services)  # type: ignore[arg-type]
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                chat = app.query_one(ChatView)
+                app.handle_chat_message("今天怎么样")
+                assert await _wait_for(pilot, lambda: not chat._busy and side.stats()["total"] == 1)
+                entry = side.entries()[0]
+                assert entry.status == "failed"
+                assert side.stats()["running"] == 0
+                # 下一轮开始：旧步骤不会混进妈咪的「运行中」
+                side.turn_started(99, "下一轮")
+                assert side._running_entries() == []
+
+        _run(_test())
+
+    def test_unfinished_tool_settled_when_turn_ends(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                side.turn_started(1, "q")
+                side.set_busy(True)
+                side.tool_started("t1", "get_quote", {}, 1)
+                side.set_busy(False)
+                await pilot.pause()
+                assert side.entries()[0].status == "cancelled"
+                assert side.stats()["running"] == 0
+
+        _run(_test())
+
+    def test_escape_shows_wait_immediately_and_after_return(self) -> None:
+        from mommy_chaogu.tui.views.chat import ChatView
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        agent = _GatedAgent(honor_cancel=False)
+
+        async def _test() -> None:
+            app = _app_with(agent)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                chat = app.query_one(ChatView)
+                bubble = side.query_one("#mascot-bubble")
+                app.handle_chat_message("茅台")
+                try:
+                    assert await _wait_for(pilot, lambda: side.stats()["running"] == 1)
+                    chat.action_cancel_chat()
+                    await pilot.pause()
+                    assert side._is_busy  # worker 还没收尾
+                    assert "等等" in str(bubble.content)  # type: ignore[attr-defined]
+                finally:
+                    agent.gate.set()  # worker 终于收尾（断言失败也放行，避免测试挂死）
+                assert await _wait_for(pilot, lambda: not side._is_busy)
+                await pilot.pause()
+                assert "等等" in str(bubble.content)  # type: ignore[attr-defined]
+
+        _run(_test())
+
+    def test_new_turn_drops_previous_reaction(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                side.mascot_event("stop")
+                side.set_busy(True)
+                await pilot.pause()
+                assert "想想" in str(side.query_one("#mascot-bubble").content)  # type: ignore[attr-defined]
+
+        _run(_test())
+
+    def test_turn_head_keeps_clock_with_scrollbar(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=(130, 24)) as pilot:
+                side = app.query_one(SidePanel)
+                side.turn_started(1, "一个很长很长很长很长很长很长很长很长很长很长的问题")
+                for i in range(12):  # 行数超过可视高度 → 出现滚动条
+                    side.tool_started(f"t{i}", "get_quote", {"code": "600519"}, 1)
+                await pilot.pause()
+                head = side._heads[1]
+                clock = head.started.strftime("%H:%M:%S")
+                rendered = head.render().plain
+                assert rendered.endswith(clock)
+                assert len(rendered) <= head.size.width
+
+        _run(_test())
+
+    def test_tick_paused_while_hidden(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                app.action_toggle_tools()
+                await pilot.pause()
+                before = side._tick_n
+                await pilot.pause(0.5)
+                assert side._tick_n == before
+                app.action_toggle_tools()
+                await pilot.pause(0.5)
+                assert side._tick_n > before
+
+        _run(_test())
+
+    def test_settled_turn_span_is_cached_and_old_turns_trimmed(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import MAX_TURNS, SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                for turn in range(1, MAX_TURNS + 3):
+                    side.turn_started(turn, f"q{turn}")
+                    side.tool_started(f"t{turn}", "get_quote", {}, turn)
+                    side.tool_finished(f"t{turn}", "done", 100, "ok")
+                await pilot.pause()
+                assert len(side._heads) == MAX_TURNS
+                assert min(side._heads) == 3
+                assert side.stats()["total"] == MAX_TURNS
+                assert len(side.query(".tl-turn")) == MAX_TURNS
+                span = side._span(MAX_TURNS + 2)
+                assert side._span_cache[MAX_TURNS + 2] == span
+
+        _run(_test())
+
+    def test_theme_switch_repaints_heads_by_turn(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                for turn in (1, 2):
+                    side.turn_started(turn, f"问题{turn}")
+                    side.tool_started(f"t{turn}", "get_quote", {}, turn)
+                app.run_slash("theme", "nord")
+                await pilot.pause()
+                assert [h.turn for h in side._heads.values()] == [1, 2]
+                assert side._heads[2].render().plain.startswith("#2 问题2")
+
+        _run(_test())
+
+
+class TestSharedDurationAndColors:
+    def test_one_duration_formatter(self) -> None:
+        from mommy_chaogu.tui.services import formatting
+        from mommy_chaogu.tui.widgets import side_panel, tool_indicator
+
+        assert tool_indicator.format_elapsed is formatting.format_elapsed
+        assert side_panel._dur(0.8509) == formatting.format_elapsed(850) == "850ms"
+        assert mascot_state(busy=True, running=["get_quote"], running_for_s=0.8509).sub.endswith(
+            "850ms"
+        )
+
+    def test_github_info_is_blue_not_green(self) -> None:
+        from mommy_chaogu.tui.services.colors import color
+
+        for theme in ("github-dark", "github-light"):
+            info = color(theme, "info")
+            r, g, b = (int(info[i : i + 2], 16) for i in (1, 3, 5))
+            assert b > g > r, (theme, info)

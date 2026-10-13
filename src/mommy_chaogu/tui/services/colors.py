@@ -188,7 +188,7 @@ _TOKENS: dict[str, _Tokens] = {
         "#0550ae",
         "#9a6700",
         "#cf222e",
-        "#1a7f37",
+        "#0550ae",
         "#eaeef2",
     ),
     "solarized-light": _Tokens(
@@ -252,7 +252,7 @@ _TOKENS: dict[str, _Tokens] = {
         "#bc8cff",
         "#d29922",
         "#f85149",
-        "#3fb950",
+        "#79c0ff",
         "#21262d",
     ),
 }

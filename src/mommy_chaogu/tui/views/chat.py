@@ -994,6 +994,8 @@ class ChatView(Vertical):
         self._busy = False
         self._cancelled = False
         self._cancel_callback = None
+        # 不经 set_busy（工作行已手动收尾），但侧栏的忙碌态必须同步复位
+        self._notify_app("on_chat_busy", False)
         log = self.query_one("#chat-log", VerticalScroll)
         await log.query("*").remove()
         log.mount(Static("", id="chat-welcome", classes="welcome-card"))
@@ -1024,9 +1026,17 @@ class ChatView(Vertical):
         真取消：先触发 cancel_event（让 worker 线程在下一个检查点退出），
         再做 UI 收尾。已流出的部分保留并标注「（已中断）」。
         """
-        if self.in_selection():
-            # 菜单打开：Esc 只关菜单（输入保留）
-            self._slash_matches, self._stock_matches = [], []
+        if self._slash_matches:
+            # / 菜单打开：Esc 放弃这条命令（清空半截的 /xx，避免随后 Enter
+            # 执行未完成的命令或 ↑ 翻历史覆盖输入）
+            self._slash_matches = []
+            prompt = self.query_one("#prompt", ChatInput)
+            prompt.value = ""
+            self._refresh_hint_bar()
+            return
+        if self._stock_matches:
+            # @ 候选打开：Esc 只关候选，正在写的句子保留
+            self._stock_matches = []
             self._refresh_hint_bar()
             return
         if not self._busy:

@@ -21,6 +21,7 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 from rich.markup import escape
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
@@ -435,13 +436,15 @@ class MommyTuiApp(App[None]):
         except Exception:
             return None
 
-    def _apply_side_visibility(self) -> None:
+    def _apply_side_visibility(self, width: int | None = None) -> None:
         side = self._side()
         if side is not None:
-            side.display = self._side_wanted and self.size.width >= self._SIDE_MIN_WIDTH
+            width = self.size.width if width is None else width
+            side.display = self._side_wanted and width >= self._SIDE_MIN_WIDTH
 
-    def on_resize(self) -> None:
-        self._apply_side_visibility()
+    def on_resize(self, event: events.Resize) -> None:
+        # App 自己的 _on_resize 在本处理器之后才更新 self.size，必须用事件里的新尺寸
+        self._apply_side_visibility(event.size.width)
 
     def action_toggle_tools(self) -> None:
         """/tools、时间线 ✕：显示 / 隐藏右侧面板。"""
@@ -986,6 +989,10 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
         chat.append_hint(error)
+        side = self._side()
+        if side is not None:
+            # 出错时仍在运行的步骤（如工作流中途抛异常）落定为失败，不再转圈
+            side.settle_running("failed", "本轮出错，未完成")
         chat.set_busy(False)
         self._active_turn_id = None
         self._mascot_event("fail")

@@ -86,3 +86,13 @@ def format_tokens_compact(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+def format_elapsed(elapsed_ms: int) -> str:
+    """耗时格式化（dexter formatDuration）：850ms / 1.2s。
+
+    对话流工具轨迹、右侧时间线与妈咪副标题共用，保证同一次调用处处一致。
+    """
+    if elapsed_ms < 1000:
+        return f"{elapsed_ms}ms"
+    return f"{elapsed_ms / 1000:.1f}s"

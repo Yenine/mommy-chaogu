@@ -36,12 +36,15 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from mommy_chaogu.tui.services.colors import color, current_theme
+from mommy_chaogu.tui.services.formatting import format_elapsed
 from mommy_chaogu.tui.services.mascot import FACES, mascot_state
 
 SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TICK_S = 0.15
 _POP_S = 0.35
 _MAX_DETAIL_LINES = 10
+# 时间线最多保留的轮次（更早的轮次连同行一起移除，长会话不无限增长）
+MAX_TURNS = 30
 
 
 def _c(role: str) -> str:
@@ -49,7 +52,7 @@ def _c(role: str) -> str:
 
 
 def _dur(seconds: float) -> str:
-    return f"{seconds * 1000:.0f}ms" if seconds < 1 else f"{seconds:.1f}s"
+    return format_elapsed(int(seconds * 1000))
 
 
 def _args_inline(args: dict[str, Any]) -> str:
@@ -204,6 +207,33 @@ class TimelineRow(Widget, can_focus=True):
         return out
 
 
+class TimelineTurnHead(Widget):
+    """轮次标题：#N 用户问题 … 时间（按自身实际宽度排版，滚动条出现也不截时间）。"""
+
+    DEFAULT_CSS = """
+    TimelineTurnHead { height: 1; padding: 0 1; margin-top: 1; }
+    """
+
+    def __init__(self, turn: int, label: str, started: datetime) -> None:
+        super().__init__(classes="tl-turn")
+        self.turn = turn
+        self.label = " ".join(label.split())
+        self.started = started
+
+    def render(self) -> Text:
+        width = max(self.size.width, 20)
+        num = f"#{self.turn} "
+        clock = self.started.strftime("%H:%M:%S")
+        room = max(1, width - cell_len(num) - cell_len(clock) - 1)
+        lab = Text(self.label, style=_c("muted"))
+        lab.truncate(room, overflow="ellipsis")
+        t = Text(no_wrap=True)
+        t.append(num, style=_c("info")).append_text(lab)
+        t.append(" " * max(1, width - cell_len(num) - cell_len(lab.plain) - cell_len(clock)))
+        t.append(clock, style=_c("muted"))
+        return t
+
+
 class _MascotFace(Static):
     """妈咪颜文字；点一下她会跳出来打招呼。"""
 
@@ -260,7 +290,6 @@ class SidePanel(Vertical):
     SidePanel #tl-close:hover { color: $text; }
     SidePanel #tl-stats { height: 1; margin-top: 1; }
     SidePanel #timeline { height: 1fr; scrollbar-size-vertical: 1; }
-    SidePanel .tl-turn { height: 1; padding: 0 1; margin-top: 1; }
     SidePanel #tl-empty { padding: 1 1; }
     """
 
@@ -268,8 +297,12 @@ class SidePanel(Vertical):
         super().__init__(id=id)
         self._entries: dict[str, TimelineEntry] = {}
         self._rows: dict[str, TimelineRow] = {}
+        self._by_turn: dict[int, list[TimelineEntry]] = {}
+        self._heads: dict[int, TimelineTurnHead] = {}
         self._turns: dict[int, tuple[str, datetime]] = {}
-        self._turn_heads: set[int] = set()
+        # 已全部收尾的轮次时间轴不再变化：缓存起止，避免每帧重扫
+        self._span_cache: dict[int, tuple[float, float]] = {}
+        self._current_turn: int | None = None
         self._is_busy = False
         self._mascot_ev: tuple[str, float] | None = None
         self._last_active = time.monotonic()
@@ -302,6 +335,10 @@ class SidePanel(Vertical):
         self._render_mascot(force=True)
         self._tick_timer = self.set_interval(_TICK_S, self._on_tick)
 
+    def on_show(self) -> None:
+        """从隐藏恢复显示：隐藏期间跳过的刷新一次补齐。"""
+        self.refresh_theme()
+
     # ------------------------------------------------------------------
     # 对外 API（app 主线程调用）
     # ------------------------------------------------------------------
@@ -309,10 +346,19 @@ class SidePanel(Vertical):
     def turn_started(self, turn: int, label: str) -> None:
         """登记一轮（轮次头在该轮首个工具出现时才挂载）。"""
         self._turns[turn] = (label, datetime.now())
+        self._current_turn = turn
 
     def set_busy(self, busy: bool) -> None:
         self._is_busy = busy
         self._last_active = time.monotonic()
+        if busy:
+            self._mascot_ev = None  # 新一轮开始：上一轮的完成/失败/中断反应作废
+        else:
+            # 轮次已收尾仍在「运行中」的条目（如工作流中途抛异常）不能永远转圈
+            self.settle_running("cancelled", "本轮结束时未完成")
+            if self._mascot_ev is not None and self._mascot_ev[0] == "stop":
+                # Esc 后 worker 迟迟才收尾：从真正停下的时刻起再展示「等等…」
+                self._mascot_ev = ("stop", time.monotonic())
         self._render_mascot()
 
     def mascot_event(self, kind: str) -> None:
@@ -338,15 +384,20 @@ class SidePanel(Vertical):
             return
         timeline = self.query_one("#timeline", VerticalScroll)
         self._hide_empty()
-        if turn not in self._turn_heads:
-            self._turn_heads.add(turn)
+        if turn not in self._heads:
             label, started = self._turns.get(turn, ("", datetime.now()))
-            timeline.mount(Static(self._turn_text(turn, label, started), classes="tl-turn"))
+            head = TimelineTurnHead(turn, label, started)
+            self._heads[turn] = head
+            self._by_turn[turn] = []
+            timeline.mount(head)
+            self._trim_old_turns()
         entry = TimelineEntry(key, name, dict(args or {}), turn)
         row = TimelineRow(entry, self._span)
         row.tick = self._tick_n
         self._entries[key] = entry
         self._rows[key] = row
+        self._by_turn[turn].append(entry)
+        self._span_cache.pop(turn, None)
         timeline.mount(row)
         timeline.scroll_end(animate=False)
         self._refresh_stats()
@@ -367,6 +418,7 @@ class SidePanel(Vertical):
         entry.status = status
         entry.summary = summary
         entry.result = result
+        self._span_cache.pop(entry.turn, None)
         self._refresh_turn_rows(entry.turn)
         self._refresh_stats()
         if status == "failed":
@@ -376,23 +428,36 @@ class SidePanel(Vertical):
 
     def cancel_running(self) -> None:
         """中断：所有运行中的工具标为已中断。"""
+        self.settle_running("cancelled", "已被用户中断")
+
+    def settle_running(self, status: str, summary: str) -> None:
+        """把仍在运行中的条目一次性落定（中断 / 出错 / 轮次收尾）。"""
         now = time.monotonic()
+        touched: set[int] = set()
         for entry in self._entries.values():
             if entry.status == "running":
-                entry.status, entry.end, entry.summary = "cancelled", now, "已被用户中断"
-                self._rows[entry.key].refresh(layout=True)
-        self._refresh_stats()
+                entry.status, entry.end, entry.summary = status, now, summary
+                touched.add(entry.turn)
+        for turn in touched:
+            self._span_cache.pop(turn, None)
+            self._refresh_turn_rows(turn)
+        if touched:
+            self._refresh_stats()
 
     async def clear(self) -> None:
-        """/clear、切会话：清空时间线。"""
+        """/clear、切会话：清空时间线，妈咪回到就绪。"""
         self._entries.clear()
         self._rows.clear()
-        self._turn_heads.clear()
+        self._by_turn.clear()
+        self._heads.clear()
+        self._span_cache.clear()
+        self._is_busy = False
+        self._mascot_ev = None
         timeline = self.query_one("#timeline", VerticalScroll)
         await timeline.query("*").remove()
         await timeline.mount(Static("", id="tl-empty"))
         self._refresh_stats()
-        self._render_mascot()
+        self._render_mascot(force=True)
 
     def stats(self) -> dict[str, int]:
         counts = {"total": len(self._entries)}
@@ -404,49 +469,47 @@ class SidePanel(Vertical):
         return list(self._entries.values())
 
     def refresh_theme(self) -> None:
-        """切主题后重绘 Python 侧着色的部分。"""
+        """切主题 / 重新显示后重绘 Python 侧着色的部分。"""
         self._refresh_stats()
         self._render_mascot(force=True)
-        for heading in self.query(".tl-turn"):
-            heading.refresh()
+        for head in self._heads.values():
+            head.refresh()
         for row in self._rows.values():
             row.refresh()
-        self._repaint_turn_heads()
 
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
 
     def _span(self, turn: int) -> tuple[float, float]:
+        cached = self._span_cache.get(turn)
+        if cached is not None:
+            return cached
         now = time.monotonic()
-        es = [e for e in self._entries.values() if e.turn == turn]
+        es = self._by_turn.get(turn, [])
         if not es:
             return now, now
-        return min(e.start for e in es), max(e.end if e.end is not None else now for e in es)
+        span = (min(e.start for e in es), max(e.end if e.end is not None else now for e in es))
+        if all(e.status != "running" for e in es):
+            self._span_cache[turn] = span
+        return span
 
     def _refresh_turn_rows(self, turn: int) -> None:
-        for row in self._rows.values():
-            if row.entry.turn == turn:
-                row.refresh(layout=True)
+        for entry in self._by_turn.get(turn, []):
+            self._rows[entry.key].refresh(layout=True)
 
-    def _turn_text(self, turn: int, label: str, started: datetime) -> Text:
-        t = Text(no_wrap=True, overflow="ellipsis")
-        t.append(f"#{turn} ", style=_c("info"))
-        width = max(self.size.width - 2, 30)
-        clock = started.strftime("%H:%M:%S")
-        room = max(4, width - cell_len(f"#{turn} ") - cell_len(clock) - 1)
-        lab = Text(" ".join(label.split()), style=_c("muted"))
-        lab.truncate(room, overflow="ellipsis")
-        t.append_text(lab)
-        t.append(" " * max(1, room - cell_len(lab.plain) + 1))
-        t.append(clock, style=_c("muted"))
-        return t
-
-    def _repaint_turn_heads(self) -> None:
-        heads = list(self.query(".tl-turn").results(Static))
-        for turn, head in zip(sorted(self._turn_heads), heads, strict=False):
-            label, started = self._turns.get(turn, ("", datetime.now()))
-            head.update(self._turn_text(turn, label, started))
+    def _trim_old_turns(self) -> None:
+        """超过 MAX_TURNS 的最早轮次连同其行一起移除。"""
+        while len(self._heads) > MAX_TURNS:
+            oldest = min(self._heads)
+            self._heads.pop(oldest).remove()
+            for entry in self._by_turn.pop(oldest, []):
+                self._entries.pop(entry.key, None)
+                row = self._rows.pop(entry.key, None)
+                if row is not None:
+                    row.remove()
+            self._span_cache.pop(oldest, None)
+            self._turns.pop(oldest, None)
 
     def _hide_empty(self) -> None:
         for w in self.query("#tl-empty"):
@@ -470,17 +533,20 @@ class SidePanel(Vertical):
             return
 
     def _running_entries(self) -> list[TimelineEntry]:
-        return [e for e in self._entries.values() if e.status == "running"]
+        """当前轮仍在运行的条目（只看当前轮，旧轮遗留不会混进妈咪的台词）。"""
+        if self._current_turn is None:
+            return []
+        return [e for e in self._by_turn.get(self._current_turn, []) if e.status == "running"]
 
     def _on_tick(self) -> None:
+        if not self.display:
+            return  # 隐藏时不做任何渲染；on_show 时一次补齐
         self._tick_n += 1
-        for entry in self._running_entries():
-            row = self._rows[entry.key]
-            row.tick = self._tick_n
-            row.refresh()
-            for other in self._rows.values():  # 运行中会拉长本轮时间轴
-                if other is not row and other.entry.turn == entry.turn:
-                    other.refresh()
+        if self._current_turn is not None and self._running_entries():
+            for entry in self._by_turn.get(self._current_turn, []):
+                row = self._rows[entry.key]
+                row.tick = self._tick_n
+                row.refresh()  # 运行中会拉长本轮时间轴，同轮各行都要重画
         self._render_mascot()
 
     def _render_mascot(self, force: bool = False) -> None:
