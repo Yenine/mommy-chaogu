@@ -111,11 +111,11 @@ class TestTruncateAtWord:
 
 class TestMatchSlashCommands:
     def test_all_on_bare_slash(self) -> None:
-        assert len(match_slash_commands("/")) == 16
+        assert len(match_slash_commands("/")) == 17
 
     def test_prefix(self) -> None:
         names = [c.name for c in match_slash_commands("/to")]
-        assert names == ["today"]
+        assert names == ["today", "tools"]
 
     def test_prefix_multiple(self) -> None:
         names = [c.name for c in match_slash_commands("/s")]
@@ -407,9 +407,9 @@ class TestAgentChatFlow:
                 stats = chat.query(".turn-stats")
                 assert len(stats) == 1
                 assert "✻" in str(stats[0].content)  # type: ignore[attr-defined]
-                # 用户消息 ❯
+                # 用户消息 ›
                 user = chat.query(".user-msg")
-                assert "❯" in str(user[0].content)  # type: ignore[attr-defined]
+                assert "›" in str(user[0].content)  # type: ignore[attr-defined]
 
         _run(_test())
 
@@ -431,12 +431,12 @@ class TestThemeFix:
                 app.action_cycle_theme()
                 await pilot.pause()
                 assert app.ui_theme == "light"
-                assert app.theme == "textual-light"
+                assert app.theme == "mommy-light"
 
                 app.action_cycle_theme()
                 await pilot.pause()
                 assert app.ui_theme == "colorblind"
-                assert app.theme == "textual-dark"
+                assert app.theme == "mommy-dark"
 
         _run(_test())
 
@@ -462,7 +462,7 @@ class TestSlashCycling:
                 prompt.value = "/"
                 await pilot.pause()
 
-                assert len(chat._slash_matches) == 16
+                assert len(chat._slash_matches) == 17
                 assert chat._slash_sel == 0
 
                 await pilot.press("down")
@@ -477,7 +477,7 @@ class TestSlashCycling:
                 # 继续 up → 环绕到最后一项
                 await pilot.press("up")
                 await pilot.pause()
-                assert chat._slash_sel == 15
+                assert chat._slash_sel == 16
                 assert chat.selected_completion() == "/quit"
 
         _run(_test())

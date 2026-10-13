@@ -1,7 +1,7 @@
-"""TopBar widget — 指数快照 + AI 状态点 + 时钟（§1.2⑤）。
+"""TopBar widget — 品牌 + 指数快照 + AI 状态点 + 会话用量 + 时钟（设计稿顶栏）。
 
-    沪指 3,847.51 ▲0.6% · AI🟢 deepseek · 14:32:05
-    指数 —             · AI⚪ 未配置      · 14:32:05
+    ◕‿◕ 妈咪炒股↗ AI 投研 Agent │ 上证 3,847.51 ▲0.6% · AI🟢 deepseek deepseek-chat · ∑ 1.2k tok · 14:32:05
+    ◕‿◕ 妈咪炒股↗ AI 投研 Agent │ 指数 — · AI⚪ 未配置 · 14:32:05
 
 启动即知 agent 是否可用（不再只记日志）。指数快照由 app 的后台 worker
 周期性喂入（set_index）；AI 状态在启动时按 AgentBridge.provider_name 设置。
@@ -13,9 +13,11 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from rich.markup import escape
 from textual.reactive import reactive
 from textual.widgets import Static
 
+from mommy_chaogu.tui.services.colors import color
 from mommy_chaogu.tui.services.formatting import (
     change_arrow,
     change_color,
@@ -44,7 +46,7 @@ def market_phase() -> str:
 
 
 class TopBar(Static):
-    """顶部状态栏：指数快照 · AI 状态 · 时间。"""
+    """顶部状态栏：品牌 · 指数快照 · AI 状态 · 用量 · 时间。"""
 
     ai_label: reactive[str] = reactive("AI⚪ 未配置")
 
@@ -54,6 +56,7 @@ class TopBar(Static):
         self._index: dict[str, Any] | None = None
         self._theme = "dark"
         self._session_tokens = 0
+        self._model = ""
 
     def on_mount(self) -> None:
         self.set_interval(1.0, self._tick)
@@ -70,15 +73,28 @@ class TopBar(Static):
         self._index = {"name": name, "price": price, "change_pct": change_pct}
         self._refresh_display()
 
+    def set_model(self, model: str) -> None:
+        """喂入当前模型名（AI 已配置时显示在 AI 状态后）。"""
+        self._model = model or ""
+        self._refresh_display()
+
     def set_session_usage(self, total_tokens: int) -> None:
         """喂入本会话累计 token（app 在每轮结束后调用）。0 时不占位。"""
         self._session_tokens = max(0, int(total_tokens))
         self._refresh_display()
 
     def set_theme(self, theme: str) -> None:
-        """主题切换后重渲染涨跌颜色。"""
+        """主题切换后重渲染品牌色与涨跌颜色。"""
         self._theme = theme
         self._refresh_display()
+
+    def _brand_text(self) -> str:
+        accent = color(self._theme, "accent")
+        muted = color(self._theme, "muted")
+        return (
+            f"[bold {accent}]◕‿◕[/] [bold]妈咪炒股[/][bold {accent}]↗[/]"
+            f" [{muted}]AI 投研 Agent[/] [{color(self._theme, 'faint')}]│[/]"
+        )
 
     def _index_text(self) -> str:
         if self._index is None:
@@ -88,14 +104,18 @@ class TopBar(Static):
         price = self._index.get("price")
         price_str = f"{float(price):,.2f}" if price is not None else "—"
         pct = self._index.get("change_pct")
-        color = change_color(pct, self._theme)
+        color_ = change_color(pct, self._theme)
         change_str = f"{change_arrow(pct)} {format_change_pct(pct)}"
-        return f"{short} {price_str} [{color}]{change_str}[/{color}]"
+        return f"{short} {price_str} [{color_}]{change_str}[/{color_}]"
 
     def _refresh_display(self) -> None:
+        ai = self.ai_label
+        if self._model and "🟢" in ai:
+            ai += f" [dim]{escape(self._model)}[/]"
         parts = [
+            self._brand_text(),
             self._index_text(),
-            f"[dim]·[/] {self.ai_label}",
+            f"[dim]·[/] {ai}",
         ]
         if self._session_tokens > 0:
             parts.append(f"[dim]· ∑ {format_tokens_compact(self._session_tokens)} tok[/]")

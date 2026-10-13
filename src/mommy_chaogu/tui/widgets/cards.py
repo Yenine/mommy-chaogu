@@ -541,7 +541,12 @@ def welcome_text(
 
     indexes / watch_total 为 None 表示数据尚未到达（先渲染骨架）。
     """
-    lines = ["[bold cyan]⏺ 欢迎使用妈妈炒股[/]"]
+    accent = color(theme, "accent")
+    muted = color(theme, "muted")
+    lines = [
+        f"[{accent}]✻[/] 欢迎使用 [bold]妈咪炒股 · AI 投研 Agent[/]",
+        f"[{muted}]Better Research · Smarter Decisions · Happier Life[/]",
+    ]
     summary: list[str] = []
     if indexes:
         idx_parts = []
@@ -556,10 +561,14 @@ def welcome_text(
     if watch_total:
         summary.append(f"自选 {watch_total} 只 [red]{watch_up} 红[/] [green]{watch_down} 绿[/]")
     if summary:
-        lines.append("  " + "｜".join(summary))
-    lines.append("  [dim]试试：今天大盘怎么样 · @茅台 · /today · /help[/]")
+        lines.append("｜".join(summary))
+    lines.append(
+        f"[{muted}]输入 [/]/[{muted}] 打开命令菜单 · 直接提问开始研究 · [/]@[{muted}] 联想股票 · [/]"
+        f"esc[{muted}] 中断当前任务[/]"
+    )
+    lines.append(f"[{muted}]试试：今天大盘怎么样 · @茅台 · /today · /help[/]")
     if not has_agent:
-        lines.append("  [yellow]AI 未配置：仅数据命令可用，配置见 .env[/]")
+        lines.append(f"[{color(theme, 'warning')}]AI 未配置：仅数据命令可用，配置见 .env[/]")
     return "\n".join(lines)
 
 

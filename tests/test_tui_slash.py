@@ -60,6 +60,7 @@ class TestSlashRegistry:
             "help",
             "clear",
             "theme",
+            "tools",
             "quit",
         }
         assert set(SLASH_COMMANDS.keys()) == expected
