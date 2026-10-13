@@ -1,7 +1,9 @@
 """StatusLine — 输入框下方的常驻状态行（设计稿底栏，取代 Footer）。
 
-⏵⏵ 只读工具自动执行 · / 命令 · @ 股票 · ↑ 历史 · esc 中断      12,480 tokens · ctrl+p 面板
-⏵⏵ 工作中 · esc 中断 · enter 排队（已排队 1 条）               12,480 tokens · ctrl+p 面板
+    ⏵⏵ 只读工具自动执行   / 命令   @ 股票   esc 中断                   12,480 tokens
+    ⏵⏵ 工作中   esc 中断   enter 排队（已排队 1 条）                    12,480 tokens
+
+Ctrl+P 命令面板、Ctrl+T 主题等全局快捷键不占底栏，见 /help。
 """
 
 from __future__ import annotations
@@ -49,15 +51,13 @@ class StatusLine(Static):
         left = Text(no_wrap=True, overflow="ellipsis")
         if self._busy:
             left.append("⏵⏵ 工作中", style=color(theme, "warning"))
-            left.append(" · esc 中断 · enter 排队", style=faint)
+            left.append("   esc 中断   enter 排队", style=faint)
             if self._queued:
                 left.append(f"（已排队 {self._queued} 条）", style=faint)
         else:
             left.append("⏵⏵ 只读工具自动执行", style=muted)
-            left.append(" · / 命令 · @ 股票 · ↑ 历史 · esc 中断", style=faint)
-        right = Text(no_wrap=True)
-        right.append(f"{self._tokens:,} tokens", style=muted)
-        right.append(" · ctrl+p 面板 · ctrl+t 主题", style=faint)
+            left.append("   / 命令   @ 股票   esc 中断", style=faint)
+        right = Text(f"{self._tokens:,} tokens", style=muted, no_wrap=True)
         width = self.content_size.width or 100
         gap = width - cell_len(left.plain) - cell_len(right.plain)
         if gap < 2:

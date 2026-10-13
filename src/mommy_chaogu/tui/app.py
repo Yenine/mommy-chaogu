@@ -49,8 +49,8 @@ from mommy_chaogu.tui.services.session_journal import SessionJournal
 from mommy_chaogu.tui.views.chat import ChatView
 from mommy_chaogu.tui.widgets.side_panel import SidePanel
 from mommy_chaogu.tui.widgets.status_line import StatusLine
-from mommy_chaogu.tui.widgets.tool_indicator import format_digest
-from mommy_chaogu.tui.widgets.top_bar import TopBar
+from mommy_chaogu.tui.widgets.tool_indicator import ToolIndicator, format_digest
+from mommy_chaogu.tui.widgets.top_bar import LogoMark, TopBar
 
 _log = logging.getLogger(__name__)
 
@@ -181,7 +181,9 @@ class MommyTuiApp(App[None]):
 
     def compose(self) -> ComposeResult:
         """单屏：TopBar + (ChatView | SidePanel)。"""
-        yield TopBar()
+        with Horizontal(id="header"):
+            yield LogoMark()
+            yield TopBar()
         with Horizontal(id="main"):
             yield ChatView()
             yield SidePanel()
@@ -216,6 +218,8 @@ class MommyTuiApp(App[None]):
         top.ai_label = f"AI🟢 {provider}" if provider else "AI⚪ 未配置"
         with contextlib.suppress(Exception):
             top.set_model(self.services.agent.model_name() or "")
+        with contextlib.suppress(Exception):
+            top.set_source(self.services.data.source_label())
 
     def _append_startup_hint(self, message: str) -> None:
         try:
@@ -421,6 +425,8 @@ class MommyTuiApp(App[None]):
             self.query_one(SidePanel).refresh_theme()
         with contextlib.suppress(Exception):
             self.query_one(StatusLine).refresh_theme()
+        for indicator in self.query(ToolIndicator):
+            indicator.refresh_theme()
         if not notify:
             return
         label = self._THEME_LABELS.get(theme, theme)
@@ -1067,6 +1073,10 @@ def main() -> None:
 
     # 用户已经显式选择 TUI，首次配置后不再追问界面。
     check_and_run_setup(offer_interface=False)
+    # 图片协议检测会向终端发查询序列，必须在 Textual 接管终端之前做
+    from mommy_chaogu.tui.services import images
+
+    images.detect()
     app = MommyTuiApp()
     app.run()
 

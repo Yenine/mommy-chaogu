@@ -30,11 +30,12 @@ from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
+from mommy_chaogu.tui.services import images
 from mommy_chaogu.tui.services.colors import color, current_theme
 from mommy_chaogu.tui.services.formatting import format_elapsed
 from mommy_chaogu.tui.services.mascot import FACES, mascot_state
@@ -89,11 +90,28 @@ _LOOK: dict[str, tuple[str, str, str]] = {
 }
 
 
+def _wrap_cells(text: str, width: int) -> list[str]:
+    """按终端单元格宽度切行（中文占 2 格）。"""
+    if not text:
+        return [""]
+    lines: list[str] = []
+    cur, cur_w = "", 0
+    for ch in text:
+        w = cell_len(ch)
+        if cur and cur_w + w > width:
+            lines.append(cur)
+            cur, cur_w = "", 0
+        cur += ch
+        cur_w += w
+    lines.append(cur)
+    return lines
+
+
 class TimelineRow(Widget, can_focus=True):
     """时间线中的一行；点击 / Enter 展开详情。"""
 
     DEFAULT_CSS = """
-    TimelineRow { height: auto; padding: 0 1; }
+    TimelineRow { height: auto; padding: 0 1; margin-bottom: 1; }
     TimelineRow:hover { background: $panel; }
     TimelineRow.-open { background: $panel; }
     TimelineRow:focus { background: $panel; }
@@ -150,11 +168,6 @@ class TimelineRow(Widget, can_focus=True):
             args.append(_args_inline(e.args), style=muted)
             args.truncate(width, overflow="ellipsis")
             lines.append(args)
-        if e.summary and e.status != "running":
-            summ = rail.copy()
-            summ.append(f"⎿ {e.summary}", style=_c("danger") if e.status == "failed" else muted)
-            summ.truncate(width, overflow="ellipsis")
-            lines.append(summ)
         lines.append(self._bar(width, tone, rail))
         if self.open:
             lines.extend(self._details(width, rail))
@@ -182,14 +195,22 @@ class TimelineRow(Widget, can_focus=True):
         muted, info = _c("muted"), _c("info")
         out: list[Text] = []
 
+        label_w = cell_len(rail.plain) + 5  # 「│ 」+「参数 」
+        value_w = max(8, width - label_w)
+
         def kv(key: str, value: str, style: str = "") -> None:
-            for i, chunk in enumerate(value.splitlines() or [""]):
-                if len(out) >= _MAX_DETAIL_LINES + 3:
+            """键值行；长值按单元格宽度折行（设计稿 pre-wrap），不截断。"""
+            chunks = [
+                c for line in (value.splitlines() or [""]) for c in _wrap_cells(line, value_w)
+            ]
+            for i, chunk in enumerate(chunks):
+                if len(out) >= _MAX_DETAIL_LINES * 2 + 3:
+                    t = rail.copy().append("     …", style=muted)
+                    out.append(t)
                     return
                 t = rail.copy()
                 t.append(f"{key if i == 0 else '':<4} ", style=muted)
                 t.append(chunk, style=style)
-                t.truncate(width, overflow="ellipsis")
                 out.append(t)
 
         kv("开始", e.started_at.strftime("%H:%M:%S"))
@@ -234,8 +255,29 @@ class TimelineTurnHead(Widget):
         return t
 
 
-class _MascotFace(Static):
-    """妈咪颜文字；点一下她会跳出来打招呼。"""
+class _MascotFace(Container):
+    """妈咪：支持图片协议的终端显示立绘，否则颜文字；点一下她会跳出来打招呼。"""
+
+    def __init__(self, id: str) -> None:
+        super().__init__(id=id)
+        self.use_image = images.supported()
+
+    def compose(self) -> ComposeResult:
+        if self.use_image:
+            from textual_image.widget import Image
+
+            yield Image(images.asset(images.POSE_IMAGES["hero"]), id="mascot-img")
+        else:
+            yield Static(id="mascot-text")
+
+    def show(self, pose: str, kaomoji: str) -> None:
+        if self.use_image:
+            img: Any = self.query_one("#mascot-img")
+            path = images.asset(images.POSE_IMAGES[pose])
+            if img.image != path:
+                img.image = path
+        else:
+            self.query_one("#mascot-text", Static).update(kaomoji)
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -263,12 +305,16 @@ class SidePanel(Vertical):
         border-left: solid $foreground 12%;
     }
     SidePanel #mascot {
-        height: 5;
-        padding: 0 1;
+        height: 6;
+        padding: 1 1 0 2;
         border-bottom: solid $foreground 12%;
     }
-    SidePanel #mascot-face { width: 12; height: 4; color: $accent; text-style: bold; }
-    SidePanel #mascot-right { width: 1fr; height: 4; }
+    SidePanel #mascot.-image { height: 9; }
+    SidePanel #mascot-face { width: 12; height: 100%; }
+    SidePanel #mascot.-image #mascot-face { width: 14; }
+    SidePanel #mascot-img { width: auto; height: 7; }
+    SidePanel #mascot-text { color: $accent; text-style: bold; }
+    SidePanel #mascot-right { width: 1fr; height: 100%; align-vertical: bottom; padding-left: 1; }
     SidePanel #mascot-bubble {
         width: auto;
         max-width: 100%;
@@ -313,7 +359,7 @@ class SidePanel(Vertical):
         self._tick_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="mascot"):
+        with Horizontal(id="mascot", classes="-image" if images.supported() else ""):
             yield _MascotFace(id="mascot-face")
             with Vertical(id="mascot-right"):
                 yield Static(id="mascot-bubble")
@@ -570,13 +616,13 @@ class SidePanel(Vertical):
             return
         self._mascot_key = key
         try:
-            face = self.query_one("#mascot-face", Static)
+            face = self.query_one("#mascot-face", _MascotFace)
             bubble = self.query_one("#mascot-bubble", Static)
             sub = self.query_one("#mascot-sub", Static)
         except Exception:
             return
         top, prop = FACES[state.pose]
-        face.update("\n".join(["", top, prop] if phase == 0 else [top, prop, ""]))
+        face.show(state.pose, "\n".join(["", top, prop] if phase == 0 else [top, prop, ""]))
         bubble.update(state.line)
         dot = Text("● ", style=_c(state.tone))
         dot.append(state.sub, style=_c("muted"))

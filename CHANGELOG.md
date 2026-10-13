@@ -23,7 +23,20 @@
   - 主题换成设计稿的 12 套：妈咪 Dark / 妈咪 Light，Tokyo Night、Catppuccin
     Mocha/Latte、Dracula、Nord、Gruvbox Dark、One Dark、GitHub Light、Solarized Light、
     Rosé Pine Dawn；保留色盲友好与 GitHub Dark。旧主题名（`solarized` / `latte` /
-    `atom` / `tokyo` / `github`）与中文别名在 `/theme` 和 `MOMMY_TUI_THEME` 中继续可用。
+    `atom` / `tokyo` / `github`）与中文别名在 `/theme` 和 `MOMMY_TUI_THEME` 中继续可用；
+  - 支持图片协议的终端（Kitty / WezTerm / Ghostty / iTerm2 新版等，Kitty 图形协议或 Sixel）
+    里，妈咪立绘与顶栏 Logo 显示真图；其他终端用颜文字。`MOMMY_TUI_IMAGES=off` 可关闭。
+    新增依赖 `textual-image`（含 Pillow）；
+  - 对话区按设计稿排版：工具行为 `⏺ 函数名(参数: 值)` + `⎿ 摘要 · 耗时`，回答为 ⏺ 栏 +
+    正文（折行悬挂缩进），表格为紧凑细网格，消息之间留空行；顶栏两行（品牌 + 工作目录 /
+    模型 + 数据源 + 指数 + AI 状态），输入框带 `›` 提示符，欢迎卡显示工作目录。
+
+### 修复
+
+- **TUI 快速工具的轨迹行一直闪烁**——问题：结果在指示器挂载前就到达的工具（毫秒级返回），
+  轨迹行停在蓝色「运行中」并持续闪烁；原因：挂载回调晚于完成回调，把状态改回了运行中；
+  现在：挂载时若已完成则直接显示完成态。
+- **TUI 切换主题后工具轨迹行颜色不变**——轨迹行的圆点颜色现在随主题重绘。
 
 ## [1.6.0] - 2026-10-11
 

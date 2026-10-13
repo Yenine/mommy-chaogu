@@ -686,3 +686,118 @@ class TestSharedDurationAndColors:
             info = color(theme, "info")
             r, g, b = (int(info[i : i + 2], 16) for i in (1, 3, 5))
             assert b > g > r, (theme, info)
+
+
+# ---------------------------------------------------------------------------
+# 图片协议终端：妈咪立绘 / Logo 真图（测试里强制打开检测结果）
+# ---------------------------------------------------------------------------
+
+
+class TestMascotImages:
+    def test_every_pose_has_image_asset(self) -> None:
+        from mommy_chaogu.tui.services import images
+
+        assert set(images.POSE_IMAGES) == set(FACES)
+        for name in [*images.POSE_IMAGES.values(), images.LOGO_IMAGE]:
+            assert images.asset(name).is_file(), name
+
+    def test_detect_respects_env_off(self, monkeypatch: Any) -> None:
+        from mommy_chaogu.tui.services import images
+
+        monkeypatch.setenv("MOMMY_TUI_IMAGES", "off")
+        assert images.detect() is False
+        monkeypatch.delenv("MOMMY_TUI_IMAGES")
+        assert images.detect() is False  # 测试进程不是 TTY → 不用真图
+
+    def test_image_widgets_follow_pose(self, monkeypatch: Any) -> None:
+        from textual_image.widget import Image
+
+        from mommy_chaogu.tui.services import images
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        monkeypatch.setattr(images, "_supported", True)
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                side = app.query_one(SidePanel)
+                img = side.query_one("#mascot-img", Image)
+                assert img.image == images.asset("hero.png")
+                assert app.query_one("#logo-img", Image)
+                side.turn_started(1, "q")
+                side.set_busy(True)
+                side.tool_started("t1", "search_news", {}, 1)
+                await pilot.pause()
+                assert img.image == images.asset("p_news.png")
+                side.tool_finished("t1", "done", 100)
+                side.set_busy(False)
+                side.mascot_event("win")
+                await pilot.pause()
+                assert img.image == images.asset("p_win.png")
+
+        _run(_test())
+
+    def test_kaomoji_fallback_without_graphics(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import SidePanel
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE) as pilot:
+                await pilot.pause()
+                side = app.query_one(SidePanel)
+                assert len(side.query("#mascot-img")) == 0
+                assert "◕‿◕" in str(side.query_one("#mascot-text").content)  # type: ignore[attr-defined]
+                assert str(app.query_one("#logo-text").content) == "◕‿◕"  # type: ignore[attr-defined]
+
+        _run(_test())
+
+
+class TestDesignChat:
+    def test_tool_header_colors_and_theme_switch(self) -> None:
+        from mommy_chaogu.tui.services.colors import color
+        from mommy_chaogu.tui.views.chat import ChatView
+        from mommy_chaogu.tui.widgets.tool_indicator import ToolIndicator
+
+        async def _test() -> None:
+            app = _app_with(_ScriptedAgent([("get_quote", True, "{}")]))
+            async with app.run_test(size=WIDE) as pilot:
+                chat = app.query_one(ChatView)
+                app.handle_chat_message("茅台")
+                assert await _wait_for(pilot, lambda: not chat._busy)
+                header = chat.query_one(ToolIndicator).query_one(".ti-header").content  # type: ignore[attr-defined]
+                assert str(header).startswith('⏺ get_quote(code: "600519")')
+                # 快速工具（结果先于挂载到达）不能停在「运行中」闪烁
+                assert chat.query_one(ToolIndicator)._timer is None
+
+                circle_dark = color("dark", "success")
+                app.run_slash("theme", "light")
+                await pilot.pause()
+                header = chat.query_one(ToolIndicator).query_one(".ti-header").content  # type: ignore[attr-defined]
+                styles = {str(s.style) for s in header.spans}  # type: ignore[attr-defined]
+                assert any(color("light", "success") in st for st in styles)
+                assert not any(circle_dark in st for st in styles)
+                # 函数名只加粗，不跟圆点同色
+                name_span = next(
+                    s for s in header.spans if header.plain[s.start : s.end] == "get_quote"
+                )  # type: ignore[attr-defined]
+                assert str(name_span.style) == "bold"
+
+        _run(_test())
+
+    def test_answer_dot_is_its_own_column(self) -> None:
+        from textual.widgets import Markdown
+
+        from mommy_chaogu.tui.views.chat import ChatView
+
+        async def _test() -> None:
+            app = _app_with(_ScriptedAgent([]))
+            async with app.run_test(size=WIDE) as pilot:
+                chat = app.query_one(ChatView)
+                app.handle_chat_message("茅台")
+                assert await _wait_for(pilot, lambda: not chat._busy)
+                row = chat.query_one(".answer-row")
+                assert str(row.query_one(".answer-dot").content) == "⏺"  # type: ignore[attr-defined]
+                md = row.query_one(".assistant-msg", Markdown)
+                assert md.source.startswith("茅台最新报价")  # 正文不再拼 ⏺
+
+        _run(_test())

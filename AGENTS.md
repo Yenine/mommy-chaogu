@@ -133,6 +133,9 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
 - 主题（`tui/services/colors.py` 单一真相源）：设计稿 12 套 + 色盲友好 + GitHub Dark，
   由同一组设计 token 生成 Python 侧语义色与 `mommy-<主题>` Textual 主题；旧名经
   `THEME_ALIASES` 兼容
+- 妈咪立绘 / Logo（`tui/services/images.py` + `tui/assets/mascot/`）：`main()` 在 Textual
+  接管终端**之前**调用 `images.detect()` 探测 Kitty 图形协议 / Sixel，支持则显示真图，
+  否则颜文字；运行中绝不重新探测（会和 Textual 抢终端输入）。`MOMMY_TUI_IMAGES=off` 关闭
 
 - 对话流内渲染富卡片（不跳屏）：slash 命令 `/today` `/watch` `/portfolio`
   `/flows [code]` `/quote <code>` `/predictions` `/signals` `/memory` `/status`

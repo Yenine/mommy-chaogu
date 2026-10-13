@@ -23,7 +23,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.suggester import Suggester
 from textual.widgets import Input, Markdown, Static
@@ -53,6 +53,15 @@ _log = logging.getLogger(__name__)
 
 _CODE_RE = re.compile(r"(?:[0-9]{6}|[A-Z]{1,6})")
 _AT_TOKEN_RE = re.compile(r"@([^\s@]*)$")
+
+
+def answer_row(md: Markdown) -> Horizontal:
+    """回答 = 左侧 ⏺ 栏 + Markdown 正文（设计稿的 flex gap；折行悬挂缩进）。
+
+    不能把 ⏺ 拼进 Markdown 文本：Textual 在空白处折行，长串中文前会把 ⏺ 甩到单独一行。
+    """
+    return Horizontal(Static("⏺", classes="answer-dot"), md, classes="answer-row")
+
 
 # service 层写操作被拒绝时 on_tool_result 收到的固定文案（红线 → 已拒绝样式）
 DENIED_RESULT_TEXT = DENIAL_RESULT_MESSAGE
@@ -165,8 +174,7 @@ class ChatInput(Input):
             event.stop()
 
     def _chat_view(self) -> ChatView | None:
-        parent = self.parent
-        return parent if isinstance(parent, ChatView) else None
+        return next((a for a in self.ancestors if isinstance(a, ChatView)), None)
 
 
 class ChatView(Vertical):
@@ -216,10 +224,12 @@ class ChatView(Vertical):
         with VerticalScroll(id="chat-log"):
             yield Static("", id="chat-welcome", classes="welcome-card")
         yield HintBar()
-        yield ChatInput(
-            placeholder="提问，或输入 / 查看命令（例：分析一下 @茅台 · /quote 600519）",
-            id="prompt",
-        )
+        with Horizontal(id="prompt-row"):
+            yield Static("›", id="prompt-caret")
+            yield ChatInput(
+                placeholder="提问，或输入 / 查看命令（例：分析一下 @茅台 · /quote 600519）",
+                id="prompt",
+            )
         yield StatusLine()
 
     def on_mount(self) -> None:
@@ -651,7 +661,7 @@ class ChatView(Vertical):
         """追加 Agent 回复（⏺ 前缀 + Markdown，dexter answer-box 风格）。"""
         log = self.query_one("#chat-log", VerticalScroll)
         normalized = text.lstrip("\n")
-        log.mount(Markdown(f"⏺ {normalized}", classes="assistant-msg"))
+        log.mount(answer_row(Markdown(normalized, classes="assistant-msg")))
         log.scroll_end(animate=False)
 
     def append_workflow_match(self, title: str, steps: list[str]) -> None:
@@ -763,7 +773,9 @@ class ChatView(Vertical):
                     )
                 )
             else:
-                log.mount(Markdown(f"⏺ {entry.content.lstrip(chr(10))}", classes="assistant-msg"))
+                log.mount(
+                    answer_row(Markdown(entry.content.lstrip(chr(10)), classes="assistant-msg"))
+                )
         log.scroll_end(animate=False)
 
     def mount_onboarding(self) -> None:
@@ -847,10 +859,10 @@ class ChatView(Vertical):
             self._working.clear_retry()
         self._stream_buffer = ""
         self._stream_dirty = False
-        widget = Markdown("⏺ …", classes="assistant-msg streaming")
+        widget = Markdown("…", classes="assistant-msg streaming")
         self._stream_widget = widget
         log = self.query_one("#chat-log", VerticalScroll)
-        log.mount(widget)
+        log.mount(answer_row(widget))
         log.scroll_end(animate=False)
 
     def append_chunk(self, delta: str) -> None:
@@ -865,7 +877,7 @@ class ChatView(Vertical):
             return
         self._stream_dirty = False
         text = self._stream_buffer.lstrip("\n")
-        self._stream_widget.update(f"⏺ {text}")
+        self._stream_widget.update(text)
         self.query_one("#chat-log", VerticalScroll).scroll_end(animate=False)
 
     def finalize_stream(self) -> str:
@@ -878,7 +890,10 @@ class ChatView(Vertical):
         self._stream_dirty = False
         # 如果从未收到 chunk（provider 不支持流式），移除占位 widget
         if not text and widget is not None:
-            widget.remove()
+            row = widget.parent
+            (
+                row if isinstance(row, Horizontal) and row.has_class("answer-row") else widget
+            ).remove()
         return text
 
     def set_cancel_callback(self, callback: Callable[[], None]) -> None:
@@ -1053,7 +1068,7 @@ class ChatView(Vertical):
         if widget is not None:
             text = self.finalize_stream()
             if text:
-                widget.update(f"⏺ {text.lstrip()}\n\n[dim]（已中断）[/]")
+                widget.update(f"{text.lstrip()}\n\n[dim]（已中断）[/]")
         if not text:
             log = self.query_one("#chat-log", VerticalScroll)
             log.mount(

@@ -172,7 +172,7 @@ class TestToolIndicatorLifecycle:
                 indicator = chat.query_one(ToolIndicator)
                 header = str(indicator.query_one(".ti-header").content)  # type: ignore[attr-defined]
                 assert "⏺" in header
-                assert "查行情(code=600519)" in header
+                assert 'get_quote(code: "600519")' in header
 
                 chat.tool_call_finished(1, True, 1230, "贵州茅台 1680.00 +0.5%")
                 await pilot.pause()
@@ -276,7 +276,7 @@ class TestBusyIndicators:
                 chat.enqueue("排队的消息")
                 await pilot.pause()
                 assert "已排队 1 条" in str(working.content)  # type: ignore[attr-defined]
-                assert "Esc 中断" in str(working.content)  # type: ignore[attr-defined]
+                assert "esc 中断" in str(working.content)  # type: ignore[attr-defined]
 
         _run(_test())
 

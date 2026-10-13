@@ -20,12 +20,19 @@ Screen {
     background: $background;
 }
 
-TopBar {
+/* 顶栏：LogoMark（头像）+ TopBar（两行品牌 / 状态） */
+#header {
     dock: top;
-    height: 1;
+    height: 3;
     background: $surface;
+    border-bottom: solid $foreground 12%;
+}
+
+TopBar {
+    width: 1fr;
+    height: 2;
     color: $text-muted;
-    padding: 0 1;
+    padding: 0 2 0 0;
 }
 
 /* 主区：左对话 + 右侧面板（SidePanel 自带 DEFAULT_CSS） */
@@ -44,16 +51,32 @@ ChatView {
     scrollbar-size-vertical: 1;
 }
 
-ChatInput {
+/* 输入行：› 提示符 + 输入框，外框随焦点变主色（设计稿输入框） */
+#prompt-row {
     height: 3;
     border: round $foreground 30%;
-    background: $background;
     margin: 0 1;
     padding: 0 1;
 }
 
-ChatInput:focus {
+#prompt-row:focus-within {
     border: round $accent;
+}
+
+#prompt-caret {
+    width: 2;
+    color: $accent;
+}
+
+ChatInput {
+    height: 1;
+    border: none;
+    background: $background;
+    padding: 0;
+}
+
+ChatInput:focus {
+    border: none;
 }
 
 /* HintBar：输入框上方浮层（/ 命令菜单 · @ 候选 · 单行提示） */
@@ -80,11 +103,12 @@ HintBar.-menu {
 ToolIndicator {
     height: auto;
     padding: 0 1;
-    margin: 0 0 0 0;
+    margin: 0 0 1 0;
 }
 
 ToolIndicator .ti-header {
     height: 1;
+    color: $text;
 }
 
 ToolIndicator .ti-detail {
@@ -174,22 +198,39 @@ WorkingIndicator {
     background: $panel;
     border-left: outer $foreground 30%;
     padding: 0 1;
-    margin: 1 0 0 0;
+    margin: 0 0 1 0;
     color: $text;
 }
 
-.assistant-msg {
+/* 回答：⏺ 栏 + 正文（设计稿 flex gap，折行悬挂缩进） */
+.answer-row {
+    height: auto;
+    margin: 0 4 1 0;
     padding: 0 1;
-    margin: 0 4 0 0;
 }
 
-/* 富卡片（slash 命令 + 工具结果渲染共用） */
-.card {
-    border: round $primary-darken-2;
-    padding: 0 2;
-    margin: 0 0 1 0;
-    height: auto;
+.answer-dot {
+    width: 2;
+    height: 1;
 }
+
+.assistant-msg {
+    width: 1fr;
+    max-width: 110;
+    padding: 0;
+    margin: 0;
+}
+
+/* 设计稿：工具结果卡片只是缩进的细框，不抢正文 */
+.card {
+    border: round $foreground 20%;
+    padding: 0 1;
+    margin: 0 0 1 2;
+    height: auto;
+    width: auto;
+    max-width: 100%;
+}
+
 
 /* 启动欢迎卡 */
 .welcome-card {
@@ -226,4 +267,32 @@ ThinkingBlock .th-body {
 
 ThinkingBlock.-expanded {
     background: $surface-darken-1;
+}
+
+/* 回答里的表格：设计稿是紧凑细网格（缩进、按内容宽、表头淡色底），
+   覆盖 Textual Markdown 默认的整宽 + 行间空行 */
+.assistant-msg MarkdownTable {
+    width: auto;
+    margin: 0 0 1 2;
+    background: transparent;
+}
+
+.assistant-msg MarkdownTableContent {
+    grid-gutter: 0 1;
+    keyline: thin $foreground 15%;
+}
+
+.assistant-msg MarkdownTableContent > .header {
+    color: $text-muted;
+    background: $panel;
+}
+
+/* 滚动条：设计稿是贴边的细淡条，不抢眼 */
+#chat-log, #timeline {
+    scrollbar-color: $foreground 20%;
+    scrollbar-color-hover: $foreground 35%;
+    scrollbar-color-active: $accent;
+    scrollbar-background: $background;
+    scrollbar-background-hover: $background;
+    scrollbar-background-active: $background;
 }

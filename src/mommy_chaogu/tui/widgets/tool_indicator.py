@@ -115,6 +115,15 @@ def format_tool_args(args: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def format_call_args(args: dict[str, Any], max_len: int = 90) -> str:
+    """设计稿式参数行：``symbol: "300750.SZ", days: 7``（值按 JSON 显示）。"""
+    parts = [
+        f"{key}: {json.dumps(value, ensure_ascii=False, default=str)}"
+        for key, value in args.items()
+    ]
+    return truncate_at_word(", ".join(parts), max_len)
+
+
 def format_result_digest(result: str, max_len: int = 60) -> str:
     """工具结果 → 单行摘要：取首行、压缩空白、截断。"""
     stripped = result.strip()
@@ -267,11 +276,13 @@ class ToolIndicator(Vertical):
 
     def __init__(self, name: str, args_summary: str, args: dict[str, Any] | None = None) -> None:
         super().__init__(classes="tool-indicator")
-        display = tool_display_name(name)
         self._tool_name = name
-        self._title = f"{display}({args_summary})" if args_summary else display
         self._args = args or {}
+        # 设计稿：函数名加粗 + 括号内参数（淡色）；中文名留给确认条等人话场景
+        self._call_args = format_call_args(self._args) if self._args else args_summary
         self._result = ""
+        self._header_role = "info"
+        self._finished = False
         self._blink_on = True
         self._timer: Timer | None = None
 
@@ -280,23 +291,31 @@ class ToolIndicator(Vertical):
         yield Static(classes="ti-more")
 
     def on_mount(self) -> None:
-        self._render_header(_c("info"), blink=True)
+        if self._finished:
+            # 快速工具：挂载前结果已到（set_complete 先于 on_mount），不能再回到「运行中」闪烁
+            self._render_header(self._header_role)
+            return
+        self._render_header("info", blink=True)
         self._timer = self.set_interval(_BLINK_INTERVAL_S, self._blink)
 
     def _blink(self) -> None:
         self._blink_on = not self._blink_on
-        self._render_header(_c("info"), blink=True)
+        self._render_header("info", blink=True)
 
-    def _render_header(self, color: str, *, blink: bool = False) -> None:
+    def _render_header(self, role: str, *, blink: bool = False) -> None:
+        """role 为语义色名（info / success / danger …），渲染时按当前主题取色。"""
+        self._header_role = role
         try:
             header = self.query_one(".ti-header", Static)
         except Exception:
             # 挂载期 compose 子节点偶发未就绪（NoMatches），延迟重试
-            self.call_after_refresh(self._render_header, color, blink=blink)
+            self.call_after_refresh(self._render_header, role, blink=blink)
             return
         circle = _CIRCLE if (not blink or self._blink_on) else " "
-        header_text = Text(f"{circle} ", style=color)
-        header_text.append(self._title)
+        header_text = Text()
+        header_text.append(f"{circle} ", style=_c(role))
+        header_text.append(self._tool_name, style="bold")
+        header_text.append(f"({self._call_args})", style=_c("muted"))
         header.update(header_text)
 
     # ── 详情展开（Kimi Code 式）─────────────────────────────────
@@ -353,7 +372,7 @@ class ToolIndicator(Vertical):
         """
         self._stop_timer()
         self._result = result
-        self._render_header(_c("muted"))
+        self._render_header("success")
         note = "（结果过大已截断）" if truncated else ""
         line = Text(_DETAIL_PREFIX, style=_c("muted"))
         line.append(digest)
@@ -366,7 +385,7 @@ class ToolIndicator(Vertical):
         """失败：红圈 + 追加 ⎿ Error 行。"""
         self._stop_timer()
         self._result = error
-        self._render_header(_c("danger"))
+        self._render_header("danger")
         detail = truncate_at_word(" ".join(error.split()), 80)
         line = Text(_DETAIL_PREFIX, style=_c("muted"))
         line.append(f"Error: {detail}", style=_c("danger"))
@@ -376,12 +395,18 @@ class ToolIndicator(Vertical):
     def set_denied(self) -> None:
         """用户在内联确认条拒绝了本次调用：黄圈 + ⎿ 已拒绝。"""
         self._stop_timer()
-        self._render_header(_c("warning"))
+        self._render_header("warning")
         line = Text(_DETAIL_PREFIX, style=_c("muted"))
         line.append("已拒绝（用户）", style=_c("warning"))
         self.mount(Static(line, classes="ti-detail"))
 
+    def refresh_theme(self) -> None:
+        """切主题后按新主题重画标题行（语义色在 Python 侧，不随 CSS 变）。"""
+        if self._finished:
+            self._render_header(self._header_role)
+
     def _stop_timer(self) -> None:
+        self._finished = True
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
