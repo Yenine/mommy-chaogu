@@ -174,13 +174,19 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
 
 ## Web 前端
 
-`uv run mommy-web` → Vue 3 + shadcn/vue + Tailwind v4。
+`uv run mommy-web` → Vue 3 单页（无路由），视觉定稿为 Claude Design「妈咪炒股」TUI 设计稿，
+与终端版同一套交互：左侧对话流 + `/` 命令菜单 + 输入框 + 底栏，右侧妈咪 + 工具调用时间线。
 
-- 桌面端侧边导航 + 移动端底部 tab（响应式）
-- 9 个页面：仪表盘/行情/主题/持仓/AI对话/个股详情/信号/设置/主题详情
-- shadcn 组件（reka-ui）+ lucide 图标
-- A 股配色（红涨绿跌）+ 深色/浅色模式
-- klinecharts K 线图 + WebSocket 实时推送
+- `web/src/App.vue` — 页面与一轮对话的状态机：先 `POST /api/agent/route`（预定义工作流，无 Key 可用），
+  未命中走 `/ws/agent` 流式对话；斜杠命令（`web/src/lib/commands.ts`）调现有 REST 渲染成表格
+- `/ws/agent` 协议（`src/mommy_chaogu/web/routes/ws.py`）：除 chunk / tool_call_* / done 外，
+  还有 `thinking_delta`、`confirm_required`（客户端回 `{"type":"confirm","id","decision"}`）、
+  `{"type":"cancel"}` 中断、`retry`、`usage`、`interrupted`；控制消息由独立读取任务即时处理
+- `/api/agent/info`（顶栏模型名，不含密钥）、`/api/agent/sessions`（`/resume`，与终端版共用记忆库）
+- 12 套主题色值逐字取自设计稿（`web/src/styles.css`，`html[data-theme]`）；涨跌按 A 股红涨绿跌
+- 妈咪立绘在 `web/public/mascot/`；远程访问的配对码在同一页输入（无单独设置页 / 配置向导，
+  AI 配置走 `mommy setup`）
+- 构建产物须同步到 `src/mommy_chaogu/web/static`（CI `diff -qr dist ../src/mommy_chaogu/web/static`）
 
 ## 产品定位（所有 Agent 的主事实）
 

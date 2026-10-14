@@ -384,7 +384,7 @@ def on_tool_result(fn_name: str, ok: bool, elapsed_ms: int, result: str) -> None
 
 ## 10. 现有两个前端
 
-- **Web**（`web/src`，Vue 3 + shadcn/vue + Tailwind v4，hash 路由）：4 个主入口——对话/行情/持仓/我的；个股、预测、信号、主题保留深链。对话页聚合自选、预测与信号上下文，消费 REST + `/ws/agent`；token 存浏览器会话（「我的」页输入）。
+- **Web**（`web/src`，Vue 3 单页，无路由）：Claude Design「妈咪炒股」设计稿——对话流 + `/` 命令菜单 + 妈咪 + 工具调用时间线。对话先走 `/api/agent/route`，未命中走 `/ws/agent`（含写操作确认 / 中断 / 思考流 / 用量）；`/today` `/watch` `/portfolio` `/flows` `/quote` 等斜杠命令消费 REST；远程访问在同页输入配对码。
 - **TUI**（`src/mommy_chaogu/tui`，Textual）：单屏对话流，工作流路由、工具事件、slash 命令、`@` 股票联想与数据富卡片全部内联显示。全部走 Python in-proc 服务层（§6）。
 
 **新前端最小功能集建议**：① 自选股快照 + 来源标签 ② AI 对话（route → chat，展示 `[匹配: X]` 与工具调用）③ 持仓盈亏 ④ 空态/降级处理（§8）。其余能力按 §3 目录逐步叠加。
