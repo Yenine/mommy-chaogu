@@ -121,11 +121,25 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
 ## TUI 终端界面
 
 `uv run mommy-tui` → 单屏对话即界面的投研 Coding Agent CLI（类似 Claude Code CLI），
-无模式切换：TopBar（指数 + AI 状态 + 时钟）+ 对话流 + 输入框，启动焦点在输入框。
+无模式切换：TopBar（品牌 + 指数 + AI 状态 + 时钟）+ 左侧对话流 / 输入框 / 状态行 +
+右侧面板（妈咪 + 工具调用时间线），启动焦点在输入框。视觉定稿为「妈咪炒股」TUI 设计稿。
+
+- 右侧面板（`tui/widgets/side_panel.py`）：妈咪姿势/台词由 `tui/services/mascot.py`
+  纯函数状态机按运行中的工具名、失败/完成/中断事件与空闲时长决定；时间线按轮次分组，
+  agent 工具调用与工作流步骤都进时间线，点击/Enter 展开参数与结果。`/tools` 开关，
+  终端窄于 100 列自动收起
+- `/` 命令菜单（`tui/widgets/hint_bar.py`）：命令 · 参数 · 说明三列，Enter 执行高亮项，
+  Esc 关菜单；输入框下方 `tui/widgets/status_line.py` 常驻模式、快捷键与会话 token
+- 主题（`tui/services/colors.py` 单一真相源）：设计稿 12 套 + 色盲友好 + GitHub Dark，
+  由同一组设计 token 生成 Python 侧语义色与 `mommy-<主题>` Textual 主题；旧名经
+  `THEME_ALIASES` 兼容
+- 妈咪立绘 / Logo（`tui/services/images.py` + `tui/assets/mascot/`）：`main()` 在 Textual
+  接管终端**之前**调用 `images.detect()` 探测 Kitty 图形协议 / Sixel，支持则显示真图，
+  否则颜文字；运行中绝不重新探测（会和 Textual 抢终端输入）。`MOMMY_TUI_IMAGES=off` 关闭
 
 - 对话流内渲染富卡片（不跳屏）：slash 命令 `/today` `/watch` `/portfolio`
   `/flows [code]` `/quote <code>` `/predictions` `/signals` `/memory` `/status`
-  `/resume [id]` `/new` `/help` `/clear` `/theme` `/quit`
+  `/resume [id]` `/new` `/help` `/clear` `/theme` `/tools` `/quit`
 - 会话恢复（`tui/services/session_journal.py`）：启动自动恢复上次会话
   （`MOMMY_TUI_RESUME=off` 关闭）；`/resume` 列出历史会话、`/resume <id>` 切换、
   `/new` 开新会话。数据源是 agent_memory 既有持久化（事件溯源派生，零新表、
@@ -155,7 +169,8 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
   + 指数/信号/@联想数据源）
 - `tui/services/renderers.py` — 工具结果 → 卡片分发；`tui/services/errors.py` — 错误文案友好映射
 - `tui/views/chat.py` — 对话视图（流式 + 卡片容器 + slash/@ 联想 + busy 排队 + Esc）
-- `tui/widgets/` — TopBar / cards（10 种富卡片）/ ToolIndicator / WorkingIndicator / HintBar
+- `tui/widgets/` — TopBar / SidePanel / StatusLine / cards（10 种富卡片）/ ToolIndicator /
+  WorkingIndicator / HintBar
 
 ## Web 前端
 
