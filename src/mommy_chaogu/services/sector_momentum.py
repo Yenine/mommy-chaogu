@@ -30,17 +30,16 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import requests
 
 from mommy_chaogu.cache.store import CacheStore
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.market_data.rankings import SECTOR_FS
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING, beijing_trade_date
 from mommy_chaogu.market_data.types import AdjustmentType, Bar, BarInterval
 
 _log = logging.getLogger(__name__)
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
 
 _CLIST_URL = "http://push2.eastmoney.com/api/qt/clist/get"
 
@@ -398,10 +397,8 @@ class SectorMomentumService:
 
     @staticmethod
     def _trade_date(timestamp: datetime) -> date:
-        """把 Bar 时间戳解释为 A 股北京交易日。"""
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=_TZ_BEIJING)
-        return timestamp.astimezone(_TZ_BEIJING).date()
+        """把 Bar 时间戳解释为 A 股北京交易日（``date`` 键类型，与 market_trade_date 的 str 区分）。"""
+        return date.fromisoformat(beijing_trade_date(timestamp))
 
     @classmethod
     def _close_by_trade_date(cls, bars: list[Bar]) -> dict[date, Decimal]:
@@ -416,8 +413,8 @@ class SectorMomentumService:
     @staticmethod
     def _bar_sort_key(timestamp: datetime) -> datetime:
         if timestamp.tzinfo is None:
-            return timestamp.replace(tzinfo=_TZ_BEIJING)
-        return timestamp.astimezone(_TZ_BEIJING)
+            return timestamp.replace(tzinfo=TZ_BEIJING)
+        return timestamp.astimezone(TZ_BEIJING)
 
     @classmethod
     def _row_from_bars(

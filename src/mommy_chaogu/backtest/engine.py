@@ -18,7 +18,6 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.backtest.costs import (
     DEFAULT_COSTS,
@@ -28,12 +27,12 @@ from mommy_chaogu.backtest.costs import (
 )
 from mommy_chaogu.backtest.metrics import max_drawdown_pct, sharpe_ratio
 from mommy_chaogu.cache.store import CacheStore
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 
 # flow_in_spike 阈值 5bp = 0.0005
 SPIKE_THRESHOLD = Decimal("0.0005")
 
 NO_COSTS_LABEL = "未扣减交易成本"
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
 
 
 def _trade_date_from_timestamp(value: Any) -> str:
@@ -52,8 +51,8 @@ def _trade_date_from_timestamp(value: Any) -> str:
         except ValueError:
             return raw[:10]
     if timestamp.tzinfo is None:
-        timestamp = timestamp.replace(tzinfo=_TZ_BEIJING)
-    return timestamp.astimezone(_TZ_BEIJING).date().isoformat()
+        timestamp = timestamp.replace(tzinfo=TZ_BEIJING)
+    return timestamp.astimezone(TZ_BEIJING).date().isoformat()
 
 
 @dataclass

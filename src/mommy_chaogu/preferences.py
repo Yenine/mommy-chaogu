@@ -16,7 +16,8 @@ from collections.abc import Mapping
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal, TypedDict
-from zoneinfo import ZoneInfo
+
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 
 type StyleT = Literal["conservative", "balanced", "aggressive"]
 type HoldingPeriodT = Literal["short", "swing", "long"]
@@ -53,7 +54,6 @@ DEFAULT_PREFERENCES: dict[str, Any] = {
     "updated_at": None,
 }
 
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
 _WINDOW_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
@@ -134,7 +134,7 @@ def passes_notification_preferences(
     if windows:
         if now.tzinfo is None:
             now = now.replace(tzinfo=UTC)
-        local = now.astimezone(_SHANGHAI)
+        local = now.astimezone(TZ_BEIJING)
         minute = local.hour * 60 + local.minute
         if not any(_in_window(minute, w) for w in windows):
             return False

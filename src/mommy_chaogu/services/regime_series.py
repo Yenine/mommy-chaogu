@@ -17,9 +17,7 @@ bull / bear / sideways 序列 + 状态持续天数 / 切换点摘要——回答
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.backtest.regime_analysis import (
     _REGIME_LABEL,
@@ -29,6 +27,7 @@ from mommy_chaogu.backtest.regime_analysis import (
 )
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.market_data.rankings import resolve_index_symbol
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import BarInterval
 
 # 服务层防御钳制：窗口太小退化成「今天的截面」（classify_market_regime
@@ -38,16 +37,6 @@ MAX_DAYS = 60
 DEFAULT_DAYS = 20
 
 NOTE = "探索性状态评估：三态判定的波动率阈值（2%/2.5%）未在真实指数数据上校准，不构成择时建议"
-
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
-
-
-def _bar_trade_date(ts: datetime) -> str:
-    """K 线时间戳 → 北京时区交易日字符串（与 cache/adapter._bar_trade_date 同语义）。"""
-    if ts.tzinfo is None:
-        # 防御：naive 视为北京墙时间
-        ts = ts.replace(tzinfo=_TZ_BEIJING)
-    return ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
 
 
 class RegimeSeriesService:
@@ -96,7 +85,7 @@ class RegimeSeriesService:
         bars = self._adapter.get_bars(code, interval=BarInterval.D1, limit=window + MA_LONG)
         by_date: dict[str, Any] = {}
         for bar in bars:
-            by_date[_bar_trade_date(bar.timestamp)] = bar.close
+            by_date[beijing_trade_date(bar.timestamp)] = bar.close
         dicts = [{"date": d, "close": c} for d, c in sorted(by_date.items())]
         if not dicts:
             return {

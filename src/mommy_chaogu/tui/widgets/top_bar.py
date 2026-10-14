@@ -13,7 +13,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -22,6 +21,7 @@ from textual.containers import Horizontal
 from textual.reactive import reactive
 from textual.widgets import Static
 
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 from mommy_chaogu.tui.services import images
 from mommy_chaogu.tui.services.colors import color
 from mommy_chaogu.tui.services.formatting import (
@@ -32,12 +32,10 @@ from mommy_chaogu.tui.services.formatting import (
     short_cwd,
 )
 
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
-
 
 def market_phase() -> str:
     """判断当前市场阶段（Asia/Shanghai 时区）。"""
-    now = datetime.now(_SHANGHAI)
+    now = datetime.now(TZ_BEIJING)
     h, m = now.hour, now.minute
     wd = now.weekday()
     if wd >= 5:
@@ -92,7 +90,7 @@ class TopBar(Static):
         self._refresh_display()
 
     def _tick(self) -> None:
-        self._clock = datetime.now(_SHANGHAI).strftime("%H:%M:%S")
+        self._clock = datetime.now(TZ_BEIJING).strftime("%H:%M:%S")
         self._refresh_display()
 
     def watch_ai_label(self, _label: str) -> None:

@@ -26,6 +26,7 @@ from backtest_stats import compute_buyhold_baseline, format_hit_rate
 
 from mommy_chaogu.backtest.scoring import score_direction
 from mommy_chaogu.db_paths import AGENT_DB
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 _log = logging.getLogger(__name__)
@@ -102,7 +103,9 @@ def fetch_efinance_history(code: str) -> list[dict[str, Any]]:
 
         result = []
         for f in flows:
-            date_str = f.timestamp.strftime("%Y-%m-%d") if f.timestamp else ""
+            # efinance 资金流时间戳是 aware UTC（北京墙时间换算而来），raw
+            # strftime 会把北京日期落成前一天；按北京交易日取（P1 收口）。
+            date_str = beijing_trade_date(f.timestamp) if f.timestamp else ""
             main_net = float(f.main_net.amount) if f.main_net else 0.0
             ratio = float(f.main_net_ratio) if f.main_net_ratio else 0.0
             result.append({"date": date_str, "main_net": main_net, "ratio": ratio})

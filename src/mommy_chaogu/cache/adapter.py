@@ -16,11 +16,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.cache.config import CacheConfig
 from mommy_chaogu.cache.store import CacheStore, QuoteCacheEntry, is_minute_interval
 from mommy_chaogu.market_data import MarketDataAdapter, Quote
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import (
     AdjustmentType,
     Bar,
@@ -34,16 +34,8 @@ from mommy_chaogu.market_data.types import (
 _log = logging.getLogger(__name__)
 
 # K 线交易日历：时间戳统一 aware UTC 后，直接 strftime 会把北京午夜
-# （UTC 前一天 16:00）落到错误的日期，落库 trade_date 必须按北京时区取。
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
-
-
-def _bar_trade_date(ts: datetime) -> str:
-    """K 线时间戳 → 北京时区的交易日字符串（YYYY-MM-DD）。"""
-    if ts.tzinfo is None:
-        # 防御：naive 视为北京墙时间（与 F2 之前 adapter 的历史语义一致）
-        ts = ts.replace(tzinfo=_TZ_BEIJING)
-    return ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
+# （UTC 前一天 16:00）落到错误的日期，落库 trade_date 必须按北京时区取
+# （单一真相源 market_data/time_utils.beijing_trade_date）。
 
 
 def _bar_to_cache_dict(
@@ -378,7 +370,7 @@ class CachedMarketDataAdapter:
                 # ——读取侧由 _read_cache 做并集。
                 by_day: dict[tuple[str, str], list[dict[str, Any]]] = {}
                 for bar in fresh:
-                    trade_date = _bar_trade_date(bar.timestamp)
+                    trade_date = beijing_trade_date(bar.timestamp)
                     by_day.setdefault((bar.adjustment.value, trade_date), []).append(
                         _bar_to_cache_dict(bar, interval_str, adj_str, keep_bar_adjustment=True)
                     )
@@ -392,7 +384,7 @@ class CachedMarketDataAdapter:
                 return
 
             for bar in fresh:
-                trade_date = _bar_trade_date(bar.timestamp)
+                trade_date = beijing_trade_date(bar.timestamp)
                 bar_dict = _bar_to_cache_dict(bar, interval_str, adj_str)
                 try:
                     self.store.set_bar(code, interval_str, adj_str, trade_date, bar_dict)
@@ -565,7 +557,7 @@ class CachedMarketDataAdapter:
           仅当无旧缓存时才把它作为「确认无数据」写入并标 ``network_empty``（与失败可区分）。
         """
         entry = self.store.get_today_money_flow_entry(code)
-        today = _bar_trade_date(_utcnow())
+        today = beijing_trade_date(_utcnow())
         key = f"today_flow:{code}"
 
         due = self._should_fetch(key, self.config.today_money_flow_fetch_interval_seconds)

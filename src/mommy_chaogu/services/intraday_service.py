@@ -27,14 +27,12 @@ import logging
 from datetime import time
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING, beijing_trade_date
 from mommy_chaogu.market_data.types import Bar, BarInterval
 
 _log = logging.getLogger(__name__)
-
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
 
 # 5 分钟 K：A 股一天 48 根（09:30-11:30 + 13:00-15:00）
 BARS_PER_DAY = 48
@@ -96,11 +94,7 @@ class IntradayService:
             return None
         by_day: dict[str, list[Bar]] = {}
         for bar in bars:
-            ts = bar.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=_TZ_BEIJING)
-            day = ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
-            by_day.setdefault(day, []).append(bar)
+            by_day.setdefault(beijing_trade_date(bar.timestamp), []).append(bar)
         for day_bars in by_day.values():
             day_bars.sort(key=_bar_sort_key)
         return by_day
@@ -238,7 +232,7 @@ class IntradayService:
         session_note = (
             "完整交易日（48 根）"
             if len(day_bars) >= BARS_PER_DAY
-            else f"盘中部分（{len(day_bars)} 根，截至 {last_bar.timestamp.astimezone(_TZ_BEIJING):%H:%M}）"
+            else f"盘中部分（{len(day_bars)} 根，截至 {last_bar.timestamp.astimezone(TZ_BEIJING):%H:%M}）"
         )
 
         result: dict[str, Any] = {
@@ -271,12 +265,12 @@ def _bar_time(bar: Bar) -> time:
     ts = bar.timestamp
     if ts.tzinfo is None:
         return ts.time()
-    return ts.astimezone(_TZ_BEIJING).time()
+    return ts.astimezone(TZ_BEIJING).time()
 
 
 def _bar_sort_key(bar: Bar) -> Any:
     """排序时统一时区，兼容历史 naive 与生产 aware 时间戳。"""
     ts = bar.timestamp
     if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=_TZ_BEIJING)
-    return ts.astimezone(_TZ_BEIJING)
+        ts = ts.replace(tzinfo=TZ_BEIJING)
+    return ts.astimezone(TZ_BEIJING)
