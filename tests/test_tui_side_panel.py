@@ -801,3 +801,37 @@ class TestDesignChat:
                 assert md.source.startswith("茅台最新报价")  # 正文不再拼 ⏺
 
         _run(_test())
+
+
+class TestRealTerminalFocus:
+    """真终端里才会出现的场景：TUI 启动时终端不在前台（先失焦，切回来再聚焦）。
+
+    Textual 失焦时记下当前焦点、回来时恢复它；若启动时自动聚焦到了对话流
+    滚动区，用户切回来打字就全进了对话流，输入框毫无反应。
+    """
+
+    def test_auto_focus_targets_prompt(self) -> None:
+        """失焦再聚焦时 Textual 恢复的是「自动聚焦」选中的控件，它必须是输入框。
+
+        真实复现（浏览器 xterm.js 真终端，启动时终端在后台）：修复前所有按键都进了
+        对话流 VerticalScroll；Textual 的测试驱动不走真实的失焦 / 恢复路径，所以这里
+        锁住机制本身。
+        """
+        from mommy_chaogu.tui.views.chat import ChatView
+
+        async def _test() -> None:
+            app = _app_with(None)
+            async with app.run_test(size=WIDE):
+                prompt = app.query_one(ChatView).query_one("#prompt")
+                auto = app.screen.query(app.screen.AUTO_FOCUS or "*").first()
+                assert auto is prompt
+                assert app.focused is prompt
+
+        _run(_test())
+
+    def test_timeline_clock_matches_top_bar_timezone(self) -> None:
+        from mommy_chaogu.tui.widgets.side_panel import TimelineEntry
+
+        entry = TimelineEntry("k", "get_quote", {}, 1)
+        assert entry.started_at.utcoffset() is not None
+        assert entry.started_at.utcoffset().total_seconds() == 8 * 3600  # type: ignore[union-attr]

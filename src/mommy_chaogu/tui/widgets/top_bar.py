@@ -56,8 +56,8 @@ class LogoMark(Horizontal):
     """顶栏左侧的妈咪头像：图片协议终端显示 logo_face.png，否则颜文字。"""
 
     DEFAULT_CSS = """
-    LogoMark { width: auto; height: 2; padding: 0 1 0 1; }
-    LogoMark #logo-img { width: auto; height: 2; }
+    LogoMark { width: 7; height: 2; padding: 0 1 0 1; }
+    LogoMark #logo-img { width: 5; height: 2; }
     LogoMark #logo-text { width: 5; height: 2; content-align: left middle; color: $accent; text-style: bold; }
     """
 

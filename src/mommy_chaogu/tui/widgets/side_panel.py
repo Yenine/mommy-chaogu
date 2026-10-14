@@ -25,6 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -44,6 +45,14 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TICK_S = 0.15
 _POP_S = 0.35
 _MAX_DETAIL_LINES = 10
+# 与顶栏时钟同一时区（A 股交易时间），避免顶栏 10:12、时间线 02:12 的错位
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+def _now() -> datetime:
+    return datetime.now(_SHANGHAI)
+
+
 # 时间线最多保留的轮次（更早的轮次连同行一起移除，长会话不无限增长）
 MAX_TURNS = 30
 
@@ -71,7 +80,7 @@ class TimelineEntry:
     args: dict[str, Any]
     turn: int
     start: float = field(default_factory=time.monotonic)
-    started_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime = field(default_factory=_now)
     end: float | None = None
     status: str = "running"  # running / done / failed / denied / cancelled
     summary: str = ""
@@ -391,7 +400,7 @@ class SidePanel(Vertical):
 
     def turn_started(self, turn: int, label: str) -> None:
         """登记一轮（轮次头在该轮首个工具出现时才挂载）。"""
-        self._turns[turn] = (label, datetime.now())
+        self._turns[turn] = (label, _now())
         self._current_turn = turn
 
     def set_busy(self, busy: bool) -> None:
@@ -431,7 +440,7 @@ class SidePanel(Vertical):
         timeline = self.query_one("#timeline", VerticalScroll)
         self._hide_empty()
         if turn not in self._heads:
-            label, started = self._turns.get(turn, ("", datetime.now()))
+            label, started = self._turns.get(turn, ("", _now()))
             head = TimelineTurnHead(turn, label, started)
             self._heads[turn] = head
             self._by_turn[turn] = []

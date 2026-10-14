@@ -27,6 +27,7 @@ from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal
 from textual.reactive import reactive
+from textual.screen import Screen
 from textual.widgets import Static
 
 from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE, ChatCallbacks
@@ -109,6 +110,17 @@ class _MommyCommandProvider(Provider):
             yield DiscoveryHit(prompt, callback, help=prompt)
 
 
+class _MainScreen(Screen[None]):
+    """主屏：自动聚焦输入框，而不是第一个可聚焦的对话流滚动区。
+
+    终端失焦再回来时 Textual 恢复的是失焦前的焦点：若启动时被自动聚焦到对话流
+    （例如启动时终端在后台），用户切回来打字就全进了对话流，输入框毫无反应。
+    只设在主屏上：弹窗（主题选择 / 帮助）仍按默认聚焦自己的控件。
+    """
+
+    AUTO_FOCUS = "#prompt"
+
+
 class MommyTuiApp(App[None]):
     """Mommy Chaogu TUI 主应用（单屏对话）。
 
@@ -178,6 +190,9 @@ class MommyTuiApp(App[None]):
         self._session_tokens: int = 0
         # 用户是否想要右侧面板（/tools 切换；窄终端时即使想要也收起）
         self._side_wanted: bool = True
+
+    def get_default_screen(self) -> Screen[None]:
+        return _MainScreen(id="_default")
 
     def compose(self) -> ComposeResult:
         """单屏：TopBar + (ChatView | SidePanel)。"""
