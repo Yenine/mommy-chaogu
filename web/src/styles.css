@@ -1,0 +1,50 @@
+/* 「妈咪炒股」网页版样式：色值逐字取自 Claude Design 设计稿（Research Agent TUI.dc.html）。
+   主题挂在 <html data-theme="…">，默认妈咪 Dark。 */
+:root{--bg:#0b0d10;--bg2:#0e1014;--text:#d6dae0;--dim:#6b7380;--accent:#5fd7af;--accent-h:#8ff0cc;--line2:#262b33;--line:#1d2128;--dots:#2a2f37;--faint:#4d5560;--userbg:#14171c;--strong:#3a404a;--usertext:#aab1bb;--muted:#8a929e;--run:#e5b567;--menu:#101318;--hover:#151920;--blue:#82aaff;--fail:#ef6b73;--track:#171b21;--thbg:#12151a;--sel:#1b2a26;--shadow:rgba(0,0,0,.4);}
+:root[data-theme="light"]{--bg:#f8f7fc;--bg2:#efecf8;--text:#1f2142;--dim:#5f6283;--accent:#6a55c9;--accent-h:#4f3ba8;--line2:#d8d3ec;--line:#e5e1f2;--dots:#cfc9e6;--faint:#777a9a;--userbg:#ece8f8;--strong:#b9b1dc;--usertext:#2e3058;--muted:#4f5276;--run:#b0700a;--menu:#ffffff;--hover:#efebfa;--blue:#1f8fb3;--fail:#d1343f;--track:#e6e2f3;--thbg:#f1eef9;--sel:#e2dbf7;--shadow:rgba(40,30,90,.12);}
+:root[data-theme="tokyo-night"]{--bg:#1a1b26;--bg2:#16161e;--text:#c0caf5;--dim:#7a82ab;--accent:#7aa2f7;--accent-h:#a9c1ff;--line2:#292e42;--line:#232433;--dots:#3b4261;--faint:#565f89;--userbg:#1f2335;--strong:#414868;--usertext:#a9b1d6;--muted:#9aa5ce;--run:#e0af68;--menu:#1f2335;--hover:#292e42;--blue:#7dcfff;--fail:#f7768e;--track:#24283b;--thbg:#1f2335;--sel:#2a3456;--shadow:rgba(0,0,0,.45);}
+:root[data-theme="catppuccin-mocha"]{--bg:#1e1e2e;--bg2:#181825;--text:#cdd6f4;--dim:#7f849c;--accent:#cba6f7;--accent-h:#e0c8ff;--line2:#313244;--line:#2a2b3c;--dots:#45475a;--faint:#6c7086;--userbg:#232334;--strong:#585b70;--usertext:#bac2de;--muted:#a6adc8;--run:#f9e2af;--menu:#181825;--hover:#2a2b3c;--blue:#89dceb;--fail:#f38ba8;--track:#313244;--thbg:#232334;--sel:#3a3150;--shadow:rgba(0,0,0,.45);}
+:root[data-theme="dracula"]{--bg:#282a36;--bg2:#21222c;--text:#f8f8f2;--dim:#8590b8;--accent:#bd93f9;--accent-h:#d6bcff;--line2:#3a3d4e;--line:#323444;--dots:#44475a;--faint:#6272a4;--userbg:#2e3040;--strong:#55586e;--usertext:#e2e2dc;--muted:#b5bad0;--run:#f1fa8c;--menu:#21222c;--hover:#343746;--blue:#8be9fd;--fail:#ff5555;--track:#343746;--thbg:#2e3040;--sel:#3f3a5c;--shadow:rgba(0,0,0,.45);}
+:root[data-theme="nord"]{--bg:#2e3440;--bg2:#292e39;--text:#eceff4;--dim:#8a94a8;--accent:#88c0d0;--accent-h:#a9d6e2;--line2:#3b4252;--line:#353b49;--dots:#434c5e;--faint:#6d778b;--userbg:#333946;--strong:#4c566a;--usertext:#d8dee9;--muted:#aeb6c6;--run:#ebcb8b;--menu:#292e39;--hover:#3b4252;--blue:#81a1c1;--fail:#bf616a;--track:#3b4252;--thbg:#333946;--sel:#3a4a58;--shadow:rgba(0,0,0,.4);}
+:root[data-theme="gruvbox-dark"]{--bg:#282828;--bg2:#1d2021;--text:#ebdbb2;--dim:#928374;--accent:#b8bb26;--accent-h:#d5d84a;--line2:#3c3836;--line:#32302f;--dots:#504945;--faint:#7c6f64;--userbg:#32302f;--strong:#665c54;--usertext:#d5c4a1;--muted:#bdae93;--run:#fabd2f;--menu:#1d2021;--hover:#3c3836;--blue:#83a598;--fail:#fb4934;--track:#3c3836;--thbg:#32302f;--sel:#3e4426;--shadow:rgba(0,0,0,.45);}
+:root[data-theme="one-dark"]{--bg:#282c34;--bg2:#21252b;--text:#abb2bf;--dim:#7f848e;--accent:#61afef;--accent-h:#8cc6ff;--line2:#3a3f4b;--line:#2f343d;--dots:#4b5263;--faint:#5c6370;--userbg:#2c313a;--strong:#4b5263;--usertext:#c5cad3;--muted:#9da5b4;--run:#e5c07b;--menu:#21252b;--hover:#2c313a;--blue:#56b6c2;--fail:#e06c75;--track:#2c313a;--thbg:#2c313a;--sel:#2d3a4f;--shadow:rgba(0,0,0,.45);}
+:root[data-theme="github-light"]{--bg:#ffffff;--bg2:#f6f8fa;--text:#1f2328;--dim:#59636e;--accent:#0969da;--accent-h:#0550ae;--line2:#d1d9e0;--line:#e3e8ee;--dots:#d1d9e0;--faint:#6e7781;--userbg:#f6f8fa;--strong:#afb8c1;--usertext:#32383f;--muted:#59636e;--run:#9a6700;--menu:#ffffff;--hover:#f3f4f6;--blue:#1a7f37;--fail:#cf222e;--track:#eaeef2;--thbg:#f6f8fa;--sel:#ddf4ff;--shadow:rgba(31,35,40,.12);}
+:root[data-theme="solarized-light"]{--bg:#fdf6e3;--bg2:#eee8d5;--text:#3b4d55;--dim:#657b83;--accent:#268bd2;--accent-h:#1a6aa3;--line2:#dcd5c0;--line:#e6dfca;--dots:#d3cbb4;--faint:#7c8b8e;--userbg:#f1ebd7;--strong:#c9c1a9;--usertext:#465a63;--muted:#586e75;--run:#b58900;--menu:#fffbf0;--hover:#eee8d5;--blue:#2aa198;--fail:#dc322f;--track:#e9e2cc;--thbg:#f3edd9;--sel:#dceaf2;--shadow:rgba(88,70,20,.12);}
+:root[data-theme="catppuccin-latte"]{--bg:#eff1f5;--bg2:#e6e9ef;--text:#4c4f69;--dim:#6c6f85;--accent:#8839ef;--accent-h:#6c22c9;--line2:#ccd0da;--line:#dce0e8;--dots:#bcc0cc;--faint:#7c7f93;--userbg:#e6e9ef;--strong:#acb0be;--usertext:#5c5f77;--muted:#5c5f77;--run:#df8e1d;--menu:#ffffff;--hover:#e6e9ef;--blue:#1e66f5;--fail:#d20f39;--track:#dce0e8;--thbg:#e6e9ef;--sel:#e3d7fa;--shadow:rgba(76,79,105,.12);}
+:root[data-theme="rose-pine-dawn"]{--bg:#faf4ed;--bg2:#f2e9e1;--text:#464261;--dim:#797593;--accent:#907aa9;--accent-h:#6f5a8c;--line2:#dfdad9;--line:#ebe5df;--dots:#cecacd;--faint:#8b87a3;--userbg:#f4ede8;--strong:#cecacd;--usertext:#575279;--muted:#6e6a86;--run:#c27a12;--menu:#fffaf3;--hover:#f2e9e1;--blue:#286983;--fail:#b4637a;--track:#ece5df;--thbg:#f4ede8;--sel:#e8dff0;--shadow:rgba(87,82,121,.12);}
+
+html, body, #app { margin: 0; height: 100%; background: var(--bg); }
+* { box-sizing: border-box; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-h); text-decoration: underline; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--line2); }
+::-webkit-scrollbar-track { background: transparent; }
+input::placeholder { color: var(--faint); }
+button { font: inherit; }
+
+/* 回答正文（Markdown）：表格按设计稿细网格，表头淡底，涨跌着色由 .up/.down 负责 */
+.md { white-space: normal; text-wrap: pretty; max-width: 760px; min-width: 0; }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md p { margin: 0 0 8px; }
+.md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
+.md code { background: var(--userbg); padding: 0 4px; border-radius: 3px; }
+.md pre { background: var(--userbg); padding: 8px 10px; overflow-x: auto; }
+.md table { border-collapse: collapse; border: 1px solid var(--line2); margin: 6px 0 8px; }
+.md th, .md td { padding: 2px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.md th { background: var(--thbg); color: var(--dim); font-weight: 500; text-align: left; }
+.md td:not(:first-child), .md th:not(:first-child) { text-align: right; }
+.md h1, .md h2, .md h3, .md h4 { font-size: 13px; margin: 8px 0 4px; }
+.md a { word-break: break-all; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* 涨跌色（A 股红涨绿跌；美股在逻辑层反转）。设计稿没有这对变量，按深浅底各给一组 */
+:root { --rise: #f0616d; --fall: #3ccf8e; }
+:root[data-theme="light"], :root[data-theme="github-light"], :root[data-theme="solarized-light"],
+:root[data-theme="catppuccin-latte"], :root[data-theme="rose-pine-dawn"] { --rise: #d1343f; --fall: #1a8a4a; }
+.rise { color: var(--rise); }
+.fall { color: var(--fall); }

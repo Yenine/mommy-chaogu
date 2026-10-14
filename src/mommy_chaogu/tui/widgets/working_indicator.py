@@ -98,18 +98,17 @@ class WorkingIndicator(Static):
 
     def _refresh_text(self) -> None:
         frame = _SPINNER_FRAMES[self._frame_idx]
-        elapsed = int(time.monotonic() - self._started)
+        elapsed = time.monotonic() - self._started
         if self._retry is not None:
             attempt, max_retries = self._retry
             parts: list[str] = [
                 f"[{self._c('warning')}]⏳ 网络较慢，正在重试 ({attempt}/{max_retries})…[/]"
             ]
         else:
-            parts = [f"[{self._c('info')}]{frame} {self._verb}…[/]"]
+            parts = [f"[{self._c('warning')}]{frame} {self._verb}…[/] "]
         # 后缀：耗时 + 可选 token 统计 + 排队数 + Esc 提示
         suffix_parts: list[str] = []
-        if elapsed >= 1:
-            suffix_parts.append(f"{elapsed}s")
+        suffix_parts.append(f"{elapsed:.1f}s")
         if self._stats_provider is not None:
             with _safe_stats(self._stats_provider) as stats:
                 if stats:
@@ -118,7 +117,7 @@ class WorkingIndicator(Static):
                         suffix_parts.append(f"↓ {_format_tokens(int(tokens))} tokens")
         if self._queued:
             suffix_parts.append(f"已排队 {self._queued} 条")
-        suffix_parts.append("Esc 中断")
+        suffix_parts.append("esc 中断")
         if suffix_parts:
             parts.append(f"[{self._c('muted')}]({' · '.join(suffix_parts)})[/]")
         self.update("".join(parts))

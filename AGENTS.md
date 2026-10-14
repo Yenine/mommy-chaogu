@@ -140,11 +140,25 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
 ## TUI 终端界面
 
 `uv run mommy-tui` → 单屏对话即界面的投研 Coding Agent CLI（类似 Claude Code CLI），
-无模式切换：TopBar（指数 + AI 状态 + 时钟）+ 对话流 + 输入框，启动焦点在输入框。
+无模式切换：TopBar（品牌 + 指数 + AI 状态 + 时钟）+ 左侧对话流 / 输入框 / 状态行 +
+右侧面板（妈咪 + 工具调用时间线），启动焦点在输入框。视觉定稿为「妈咪炒股」TUI 设计稿。
+
+- 右侧面板（`tui/widgets/side_panel.py`）：妈咪姿势/台词由 `tui/services/mascot.py`
+  纯函数状态机按运行中的工具名、失败/完成/中断事件与空闲时长决定；时间线按轮次分组，
+  agent 工具调用与工作流步骤都进时间线，点击/Enter 展开参数与结果。`/tools` 开关，
+  终端窄于 100 列自动收起
+- `/` 命令菜单（`tui/widgets/hint_bar.py`）：命令 · 参数 · 说明三列，Enter 执行高亮项，
+  Esc 关菜单；输入框下方 `tui/widgets/status_line.py` 常驻模式、快捷键与会话 token
+- 主题（`tui/services/colors.py` 单一真相源）：设计稿 12 套 + 色盲友好 + GitHub Dark，
+  由同一组设计 token 生成 Python 侧语义色与 `mommy-<主题>` Textual 主题；旧名经
+  `THEME_ALIASES` 兼容
+- 妈咪立绘 / Logo（`tui/services/images.py` + `tui/assets/mascot/`）：`main()` 在 Textual
+  接管终端**之前**调用 `images.detect()` 探测 Kitty 图形协议 / Sixel，支持则显示真图，
+  否则颜文字；运行中绝不重新探测（会和 Textual 抢终端输入）。`MOMMY_TUI_IMAGES=off` 关闭
 
 - 对话流内渲染富卡片（不跳屏）：slash 命令 `/today` `/watch` `/portfolio`
   `/flows [code]` `/quote <code>` `/predictions` `/signals` `/memory` `/status`
-  `/resume [id]` `/new` `/help` `/clear` `/theme` `/quit`
+  `/resume [id]` `/new` `/help` `/clear` `/theme` `/tools` `/quit`
 - 会话恢复（`tui/services/session_journal.py`）：启动自动恢复上次会话
   （`MOMMY_TUI_RESUME=off` 关闭）；`/resume` 列出历史会话、`/resume <id>` 切换、
   `/new` 开新会话。数据源是 agent_memory 既有持久化（事件溯源派生，零新表、
@@ -174,17 +188,24 @@ Agent 交互指导见 `docs/AGENT-INTERACTION-GUIDE.md`。
   + 指数/信号/@联想数据源）
 - `tui/services/renderers.py` — 工具结果 → 卡片分发；`tui/services/errors.py` — 错误文案友好映射
 - `tui/views/chat.py` — 对话视图（流式 + 卡片容器 + slash/@ 联想 + busy 排队 + Esc）
-- `tui/widgets/` — TopBar / cards（10 种富卡片）/ ToolIndicator / WorkingIndicator / HintBar
+- `tui/widgets/` — TopBar / SidePanel / StatusLine / cards（10 种富卡片）/ ToolIndicator /
+  WorkingIndicator / HintBar
 
 ## Web 前端
 
-`uv run mommy-web` → Vue 3 + shadcn/vue + Tailwind v4。
+`uv run mommy-web` → Vue 3 单页（无路由），视觉定稿为 Claude Design「妈咪炒股」TUI 设计稿，
+与终端版同一套交互：左侧对话流 + `/` 命令菜单 + 输入框 + 底栏，右侧妈咪 + 工具调用时间线。
 
-- 桌面端侧边导航 + 移动端底部 tab（响应式）
-- 9 个页面：仪表盘/行情/主题/持仓/AI对话/个股详情/信号/设置/主题详情
-- shadcn 组件（reka-ui）+ lucide 图标
-- A 股配色（红涨绿跌）+ 深色/浅色模式
-- klinecharts K 线图 + WebSocket 实时推送
+- `web/src/App.vue` — 页面与一轮对话的状态机：先 `POST /api/agent/route`（预定义工作流，无 Key 可用），
+  未命中走 `/ws/agent` 流式对话；斜杠命令（`web/src/lib/commands.ts`）调现有 REST 渲染成表格
+- `/ws/agent` 协议（`src/mommy_chaogu/web/routes/ws.py`）：除 chunk / tool_call_* / done 外，
+  还有 `thinking_delta`、`confirm_required`（客户端回 `{"type":"confirm","id","decision"}`）、
+  `{"type":"cancel"}` 中断、`retry`、`usage`、`interrupted`；控制消息由独立读取任务即时处理
+- `/api/agent/info`（顶栏模型名，不含密钥）、`/api/agent/sessions`（`/resume`，与终端版共用记忆库）
+- 12 套主题色值逐字取自设计稿（`web/src/styles.css`，`html[data-theme]`）；涨跌按 A 股红涨绿跌
+- 妈咪立绘在 `web/public/mascot/`；远程访问的配对码在同一页输入（无单独设置页 / 配置向导，
+  AI 配置走 `mommy setup`）
+- 构建产物须同步到 `src/mommy_chaogu/web/static`（CI `diff -qr dist ../src/mommy_chaogu/web/static`）
 
 ## 产品定位（所有 Agent 的主事实）
 

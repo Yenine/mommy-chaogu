@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
+from pathlib import Path
 
 
 def format_amount(val: Decimal | float | int | None) -> str:
@@ -86,3 +88,23 @@ def format_tokens_compact(n: int) -> str:
     if n >= 1000:
         return f"{n / 1000:.1f}k"
     return str(n)
+
+
+def format_elapsed(elapsed_ms: int) -> str:
+    """耗时格式化（dexter formatDuration）：850ms / 1.2s。
+
+    对话流工具轨迹、右侧时间线与妈咪副标题共用，保证同一次调用处处一致。
+    """
+    if elapsed_ms < 1000:
+        return f"{elapsed_ms}ms"
+    return f"{elapsed_ms / 1000:.1f}s"
+
+
+def short_cwd(path: str | None = None) -> str:
+    """当前工作目录，家目录缩写为 ~（设计稿顶栏 / 欢迎卡的「工作目录」）。"""
+    cwd = Path(path or os.getcwd())
+    home = Path.home()
+    try:
+        return "~/" + str(cwd.relative_to(home)) if cwd != home else "~"
+    except ValueError:
+        return str(cwd)

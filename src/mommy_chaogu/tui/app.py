@@ -2,10 +2,10 @@
 
 MommyTuiApp — 投研 Coding Agent CLI：单屏对话即界面。
 
-布局（无 ContentSwitcher、无看板模式）：
-    TopBar（指数快照 + AI 状态 + 时钟）
-    ChatView（对话流 + HintBar + 输入框）
-    Footer
+布局（无 ContentSwitcher、无看板模式；定稿见「妈咪炒股」TUI 设计稿）：
+    TopBar（品牌 + 指数快照 + AI 状态 + 用量 + 时钟）
+    ┌ ChatView（对话流 + / 命令菜单 + 输入框 + 状态行）
+    └ SidePanel（妈咪 + 工具调用时间线；/tools 开关，窄终端自动收起）
 """
 
 from __future__ import annotations
@@ -21,23 +21,37 @@ from collections.abc import Callable
 from typing import Any, ClassVar
 
 from rich.markup import escape
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
+from textual.containers import Horizontal
 from textual.reactive import reactive
-from textual.widgets import Footer, Static
+from textual.screen import Screen
+from textual.widgets import Static
 
-from mommy_chaogu.agent.service import ChatCallbacks
+from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE, ChatCallbacks
 from mommy_chaogu.db_paths import DEFAULT_DATA_DIR
 from mommy_chaogu.tui.messages import StepStatus
 from mommy_chaogu.tui.screens.help import HelpScreen
 from mommy_chaogu.tui.screens.theme_picker import ThemePickerScreen
 from mommy_chaogu.tui.services.bootstrap import Services
-from mommy_chaogu.tui.services.colors import FALLBACK_BG, GITHUB_TEXTUAL_THEMES, LIGHT_BG_THEMES
+from mommy_chaogu.tui.services.colors import (
+    LIGHT_BG_THEMES,
+    TEXTUAL_THEMES,
+    THEME_LABELS,
+    THEMES,
+    resolve_theme,
+    textual_theme_name,
+    theme_background,
+)
 from mommy_chaogu.tui.services.errors import friendly_error
 from mommy_chaogu.tui.services.session_journal import SessionJournal
 from mommy_chaogu.tui.views.chat import ChatView
-from mommy_chaogu.tui.widgets.top_bar import TopBar
+from mommy_chaogu.tui.widgets.side_panel import SidePanel
+from mommy_chaogu.tui.widgets.status_line import StatusLine
+from mommy_chaogu.tui.widgets.tool_indicator import ToolIndicator, format_digest
+from mommy_chaogu.tui.widgets.top_bar import LogoMark, TopBar
 
 _log = logging.getLogger(__name__)
 
@@ -72,6 +86,7 @@ class _MommyCommandProvider(Provider):
             ("近期信号 /signals", lambda: app.run_slash("signals")),
             ("记忆系统 /memory", lambda: app.run_slash("memory")),
             ("服务状态 /status", lambda: app.run_slash("status")),
+            ("工具调用时间线 /tools", app.action_toggle_tools),
             ("清空对话 /clear", lambda: app.run_slash("clear")),
             ("帮助", app.action_help),
             ("切换主题", app.action_cycle_theme),
@@ -95,6 +110,17 @@ class _MommyCommandProvider(Provider):
             yield DiscoveryHit(prompt, callback, help=prompt)
 
 
+class _MainScreen(Screen[None]):
+    """主屏：自动聚焦输入框，而不是第一个可聚焦的对话流滚动区。
+
+    终端失焦再回来时 Textual 恢复的是失焦前的焦点：若启动时被自动聚焦到对话流
+    （例如启动时终端在后台），用户切回来打字就全进了对话流，输入框毫无反应。
+    只设在主屏上：弹窗（主题选择 / 帮助）仍按默认聚焦自己的控件。
+    """
+
+    AUTO_FOCUS = "#prompt"
+
+
 class MommyTuiApp(App[None]):
     """Mommy Chaogu TUI 主应用（单屏对话）。
 
@@ -103,7 +129,7 @@ class MommyTuiApp(App[None]):
         python -m mommy_chaogu.tui.app
     """
 
-    TITLE = "Mommy Chaogu"
+    TITLE = "妈咪炒股"
     CSS_PATH = "styles.tcss"
 
     COMMANDS: ClassVar[set[type[Provider] | Any]] = {_MommyCommandProvider}
@@ -118,47 +144,13 @@ class MommyTuiApp(App[None]):
 
     services: Services
     ui_theme: reactive[str] = reactive("dark")
-    _THEMES: ClassVar[list[str]] = [
-        "dark",
-        "light",
-        "colorblind",
-        "solarized",
-        "nord",
-        "latte",
-        "atom",
-        "github",
-        "github-light",
-        "dracula",
-        "tokyo",
-    ]
-    # ui_theme 名 → textual 主题名（CSS token 跟随后者）；github 两套
-    # 是本应用自定义注册的（textual 无内置），见 _register_github_themes
-    _TEXTUAL_THEMES: ClassVar[dict[str, str]] = {
-        "dark": "textual-dark",
-        "light": "textual-light",
-        "colorblind": "textual-dark",
-        "solarized": "solarized-light",
-        "nord": "nord",
-        "latte": "catppuccin-latte",
-        "atom": "atom-one-dark",
-        "github": "mommy-github-dark",
-        "github-light": "mommy-github-light",
-        "dracula": "dracula",
-        "tokyo": "tokyo-night",
-    }
-    _THEME_LABELS: ClassVar[dict[str, str]] = {
-        "dark": "深色",
-        "light": "浅色",
-        "colorblind": "色盲友好",
-        "solarized": "日光",
-        "nord": "极夜",
-        "latte": "拿铁",
-        "atom": "Atom",
-        "github": "GitHub",
-        "github-light": "GitHub 浅色",
-        "dracula": "Dracula",
-        "tokyo": "Tokyo Night",
-    }
+    _THEMES: ClassVar[list[str]] = list(THEMES)
+    # ui_theme 名 → textual 主题名（CSS token 跟随后者）；全部主题由
+    # colors.py 的设计 token 生成，on_mount 时注册
+    _TEXTUAL_THEMES: ClassVar[dict[str, str]] = {t: textual_theme_name(t) for t in THEMES}
+    _THEME_LABELS: ClassVar[dict[str, str]] = dict(THEME_LABELS)
+    # 右侧面板（妈咪 + 时间线）需要的最小终端宽度；更窄时自动收起
+    _SIDE_MIN_WIDTH: ClassVar[int] = 100
     _INDEX_REFRESH_S: ClassVar[float] = 60.0
 
     def __init__(self, services: Services | None = None) -> None:
@@ -196,18 +188,27 @@ class MommyTuiApp(App[None]):
         )
         # 本会话累计 token（每轮结束累加，TopBar 常驻显示）
         self._session_tokens: int = 0
+        # 用户是否想要右侧面板（/tools 切换；窄终端时即使想要也收起）
+        self._side_wanted: bool = True
+
+    def get_default_screen(self) -> Screen[None]:
+        return _MainScreen(id="_default")
 
     def compose(self) -> ComposeResult:
-        """单屏：TopBar + ChatView + Footer。"""
-        yield TopBar()
-        yield ChatView()
-        yield Footer()
+        """单屏：TopBar + (ChatView | SidePanel)。"""
+        with Horizontal(id="header"):
+            yield LogoMark()
+            yield TopBar()
+        with Horizontal(id="main"):
+            yield ChatView()
+            yield SidePanel()
 
     def on_mount(self) -> None:
         """设置主题 / AI 状态点，启动行情回填 worker + 周期刷新。"""
-        self._register_github_themes()
-        self.ui_theme = os.environ.get("MOMMY_TUI_THEME", "dark")
+        self._register_themes()
+        self.ui_theme = resolve_theme(os.environ.get("MOMMY_TUI_THEME", "")) or "dark"
         self._apply_theme(notify=False)
+        self._apply_side_visibility()
         self._set_ai_label()
         self._refresh_market()
         self.set_interval(self._INDEX_REFRESH_S, self._refresh_market)
@@ -230,6 +231,10 @@ class MommyTuiApp(App[None]):
             return
         provider = self.services.agent.provider_name()
         top.ai_label = f"AI🟢 {provider}" if provider else "AI⚪ 未配置"
+        with contextlib.suppress(Exception):
+            top.set_model(self.services.agent.model_name() or "")
+        with contextlib.suppress(Exception):
+            top.set_source(self.services.data.source_label())
 
     def _append_startup_hint(self, message: str) -> None:
         try:
@@ -388,13 +393,7 @@ class MommyTuiApp(App[None]):
         label = self._THEME_LABELS.get(tid, tid)
         tag = "浅底" if tid in LIGHT_BG_THEMES else "深底"
         mark = "● 当前" if tid == self.ui_theme else ""
-        return f"[on {self._theme_bg_hex(tid)}]   [/] {label} · {tag} {mark}"
-
-    def _theme_bg_hex(self, tid: str) -> str:
-        """主题代表背景色（取 textual 主题定义，取不到回退中性灰）。"""
-        theme = self.get_theme(self._TEXTUAL_THEMES.get(tid, "textual-dark"))
-        bg = theme.background if theme else None
-        return bg if isinstance(bg, str) and bg.startswith("#") else FALLBACK_BG
+        return f"[on {theme_background(tid)}]   [/] {label} · {tag} {mark}"
 
     def _preview_theme(self, name: str) -> None:
         """选择器高亮回调：立即套用、不弹 toast（实时预览）。"""
@@ -410,17 +409,9 @@ class MommyTuiApp(App[None]):
     def action_cycle_theme(self, name: str = "") -> None:
         """Ctrl+T 循环切换；`/theme <名称>` 直接选中（如 /theme nord）。"""
         if name:
-            candidates = {t.lower(): t for t in self._THEMES}
-            aliases = {
-                "日光": "solarized",
-                "极夜": "nord",
-                "拿铁": "latte",
-                "浅色": "light",
-                "深色": "dark",
-            }
-            key = aliases.get(name, aliases.get(name.lower(), name.lower()))
-            if key in candidates:
-                self.ui_theme = candidates[key]
+            key = resolve_theme(name)
+            if key is not None:
+                self.ui_theme = key
                 self._apply_theme()
                 return
         try:
@@ -430,9 +421,9 @@ class MommyTuiApp(App[None]):
         self.ui_theme = self._THEMES[(idx + 1) % len(self._THEMES)]
         self._apply_theme()
 
-    def _register_github_themes(self) -> None:
-        """注册 GitHub Primer 官方配色（色值定义在 colors.py，on_mount 时执行）。"""
-        for theme in GITHUB_TEXTUAL_THEMES:
+    def _register_themes(self) -> None:
+        """注册设计稿主题（色值定义在 colors.py，on_mount 时执行）。"""
+        for theme in TEXTUAL_THEMES:
             self.register_theme(theme)
 
     def _apply_theme(self, notify: bool = True) -> None:
@@ -442,13 +433,81 @@ class MommyTuiApp(App[None]):
         formatting.change_color() 检查 ui_theme 后处理。
         """
         theme = self.ui_theme
-        self.theme = self._TEXTUAL_THEMES.get(theme, "textual-dark")
+        self.theme = self._TEXTUAL_THEMES.get(theme, textual_theme_name("dark"))
         with contextlib.suppress(Exception):
             self.query_one(TopBar).set_theme(theme)
+        with contextlib.suppress(Exception):
+            self.query_one(SidePanel).refresh_theme()
+        with contextlib.suppress(Exception):
+            self.query_one(StatusLine).refresh_theme()
+        for indicator in self.query(ToolIndicator):
+            indicator.refresh_theme()
         if not notify:
             return
         label = self._THEME_LABELS.get(theme, theme)
         self.notify(f"主题已切换：{label}", timeout=3)
+
+    # ------------------------------------------------------------------
+    # 右侧面板（妈咪 + 工具调用时间线）
+    # ------------------------------------------------------------------
+
+    def _side(self) -> SidePanel | None:
+        try:
+            return self.query_one(SidePanel)
+        except Exception:
+            return None
+
+    def _apply_side_visibility(self, width: int | None = None) -> None:
+        side = self._side()
+        if side is not None:
+            width = self.size.width if width is None else width
+            side.display = self._side_wanted and width >= self._SIDE_MIN_WIDTH
+
+    def on_resize(self, event: events.Resize) -> None:
+        # App 自己的 _on_resize 在本处理器之后才更新 self.size，必须用事件里的新尺寸
+        self._apply_side_visibility(event.size.width)
+
+    def action_toggle_tools(self) -> None:
+        """/tools、时间线 ✕：显示 / 隐藏右侧面板。"""
+        self._side_wanted = not self._side_wanted
+        self._apply_side_visibility()
+        side = self._side()
+        if self._side_wanted and side is not None and not side.display:
+            self.notify(f"终端宽度不足 {self._SIDE_MIN_WIDTH} 列，右侧面板暂不显示", timeout=3)
+        else:
+            self.notify(
+                "已显示工具调用时间线" if self._side_wanted else "已隐藏工具调用时间线", timeout=2
+            )
+
+    def on_chat_busy(self, busy: bool) -> None:
+        """ChatView 钩子：轮次开始 / 结束 → 妈咪忙碌态。"""
+        side = self._side()
+        if side is not None:
+            side.set_busy(busy)
+
+    def on_chat_activity(self) -> None:
+        """ChatView 钩子：用户在输入 → 叫醒妈咪。"""
+        side = self._side()
+        if side is not None:
+            side.touch()
+
+    def on_chat_interrupted(self) -> None:
+        """ChatView 钩子：Esc 中断 → 运行中的工具标为已中断 + 妈咪「等等…」。"""
+        side = self._side()
+        if side is not None:
+            side.cancel_running()
+            side.mascot_event("stop")
+
+    async def on_chat_cleared(self) -> None:
+        """ChatView 钩子：/clear、切会话 → 时间线一并清空。"""
+        side = self._side()
+        if side is not None:
+            await side.clear()
+
+    def _mascot_event(self, kind: str) -> None:
+        side = self._side()
+        if side is not None:
+            side.mascot_event(kind)
 
     # ------------------------------------------------------------------
     # 对话入口（ChatView 委托）
@@ -464,6 +523,9 @@ class MommyTuiApp(App[None]):
         self._turn_seq += 1
         turn_id = self._turn_seq
         self._active_turn_id = turn_id
+        side = self._side()
+        if side is not None:
+            side.turn_started(turn_id, text)
 
         # 每轮重置 cancel + usage 状态
         cancel_event = threading.Event()
@@ -574,6 +636,18 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
         chat.post_message(StepStatus(idx=idx, state=state, detail=detail, turn_id=turn_id))
+        side = self._side()
+        if side is not None:
+            key = f"w{turn_id}-{idx}"
+            if state == "running":
+                side.tool_started(key, detail, {}, turn_id)
+            else:
+                side.tool_finished(
+                    key,
+                    "done" if state == "ok" else "failed",
+                    None,
+                    "完成" if state == "ok" else "失败",
+                )
 
     def _on_workflow_done(self, turn_id: int, summary: str) -> None:
         """主线程：工作流执行完成。"""
@@ -593,6 +667,7 @@ class MommyTuiApp(App[None]):
         chat.set_busy(False)
         self._active_turn_id = None
         chat.finish_turn(self._turn_elapsed_ms())
+        self._mascot_event("win")
         self._drain_queue()
 
     # ------------------------------------------------------------------
@@ -751,6 +826,9 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
         chat.tool_call_started(self._tool_seq, name, args)
+        side = self._side()
+        if side is not None:
+            side.tool_started(f"t{self._tool_seq}", name, args, turn_id)
 
     def _post_tool_result(
         self, turn_id: int, name: str, ok: bool, elapsed_ms: int, result: str
@@ -767,6 +845,16 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
         chat.tool_call_finished(call_id, ok, elapsed_ms, result)
+        side = self._side()
+        if side is not None:
+            if ok:
+                status, digest = "done", format_digest(name, result)
+            elif result == DENIAL_RESULT_MESSAGE:
+                status, digest = "denied", "已拒绝（用户）"
+            else:
+                status = "failed"
+                digest = next((ln.strip() for ln in result.splitlines() if ln.strip()), "失败")
+            side.tool_finished(f"t{call_id}", status, elapsed_ms, digest, result)
 
     def _on_retry_status(self, turn_id: int, attempt: int, max_retries: int) -> None:
         """主线程：重试状态 → 工作行显示「⏳ 网络较慢，正在重试 (1/3)…」。"""
@@ -852,6 +940,8 @@ class MommyTuiApp(App[None]):
             self._session_tokens += tokens
             with contextlib.suppress(Exception):
                 self.query_one(TopBar).set_session_usage(self._session_tokens)
+            with contextlib.suppress(Exception):
+                self.query_one(StatusLine).set_tokens(self._session_tokens)
         chat = self._chat_or_defer(
             self._on_agent_done, turn_id, user_text, reply, interrupted, usage
         )
@@ -894,6 +984,7 @@ class MommyTuiApp(App[None]):
             "completion_tokens", 0
         )
         chat.finish_turn(self._turn_elapsed_ms(), tokens=tokens)
+        self._mascot_event("win")
 
         # 记忆回执：后台提取完成后在对话流尾部追加淡色一行
         self.services.agent.watch_background(
@@ -919,8 +1010,13 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
         chat.append_hint(error)
+        side = self._side()
+        if side is not None:
+            # 出错时仍在运行的步骤（如工作流中途抛异常）落定为失败，不再转圈
+            side.settle_running("failed", "本轮出错，未完成")
         chat.set_busy(False)
         self._active_turn_id = None
+        self._mascot_event("fail")
         self._drain_queue()
 
     # ------------------------------------------------------------------
@@ -992,6 +1088,10 @@ def main() -> None:
 
     # 用户已经显式选择 TUI，首次配置后不再追问界面。
     check_and_run_setup(offer_interface=False)
+    # 图片协议检测会向终端发查询序列，必须在 Textual 接管终端之前做
+    from mommy_chaogu.tui.services import images
+
+    images.detect()
     app = MommyTuiApp()
     app.run()
 

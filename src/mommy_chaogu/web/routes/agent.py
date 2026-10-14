@@ -209,6 +209,49 @@ async def get_history(
         return {"messages": [], "total": 0}
 
 
+@router.get("/info")
+async def agent_info() -> dict[str, Any]:
+    """当前 AI 配置（顶栏「模型 xxx」）：只给是否配置 / provider / model，绝不含密钥。"""
+    from mommy_chaogu.agent.llm import resolve_model, resolve_provider
+    from mommy_chaogu.config import load_config
+
+    try:
+        cfg = load_config().agent
+        provider = resolve_provider(cfg.provider)
+        return {
+            "configured": bool(cfg.api_key),
+            "provider": provider,
+            "model": resolve_model(provider, cfg.model),
+        }
+    except Exception as exc:
+        _log.warning("读取 AI 配置失败: %s", exc)
+        return {"configured": False, "provider": "", "model": ""}
+
+
+@router.get("/sessions")
+async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+    """可恢复的历史会话（/resume 列表；与终端版共用 agent_memory，按最近活跃倒序）。"""
+    from mommy_chaogu.tui.services.session_journal import SessionJournal
+
+    memory = get_agent_memory()
+    try:
+        rows = await asyncio.to_thread(SessionJournal(memory).sessions, limit)
+    except Exception as exc:
+        _log.warning("读取历史会话失败: %s", exc)
+        return {"sessions": []}
+    return {
+        "sessions": [
+            {
+                "session_id": r.session_id,
+                "messages": r.n_messages,
+                "last_active": r.last_active.isoformat(),
+                "preview": r.preview,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.get("/predictions")
 async def get_predictions(
     limit: int = Query(default=20, ge=1, le=200),

@@ -30,6 +30,7 @@ dependencies = [
     "textual>=8.2.8",
     "qrcode>=8.0",
     "cryptography>=50.0.0",
+    "textual-image[textual]>=0.14.1",
 ]
 
 [project.scripts]

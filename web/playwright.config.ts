@@ -21,5 +21,14 @@ export default defineConfig({
       MOMMY_REFERENCE_DB: '/tmp/mommy-e2e-reference.db',
     },
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        // 本地可用 PW_CHROMIUM_PATH 指向已有的 Chromium（CI 用 playwright install 的版本）
+        launchOptions: process.env.PW_CHROMIUM_PATH ? { executablePath: process.env.PW_CHROMIUM_PATH } : {},
+      },
+    },
+  ],
 })

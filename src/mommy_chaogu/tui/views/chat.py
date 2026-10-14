@@ -23,7 +23,7 @@ from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.suggester import Suggester
 from textual.widgets import Input, Markdown, Static
@@ -38,6 +38,7 @@ from mommy_chaogu.tui.views.slash_cards import SlashCardFactory
 from mommy_chaogu.tui.widgets import cards
 from mommy_chaogu.tui.widgets.confirm_bar import ConfirmBar
 from mommy_chaogu.tui.widgets.hint_bar import HintBar
+from mommy_chaogu.tui.widgets.status_line import StatusLine
 from mommy_chaogu.tui.widgets.thinking import ThinkingBlock
 from mommy_chaogu.tui.widgets.tool_indicator import (
     ToolIndicator,
@@ -52,6 +53,15 @@ _log = logging.getLogger(__name__)
 
 _CODE_RE = re.compile(r"(?:[0-9]{6}|[A-Z]{1,6})")
 _AT_TOKEN_RE = re.compile(r"@([^\s@]*)$")
+
+
+def answer_row(md: Markdown) -> Horizontal:
+    """回答 = 左侧 ⏺ 栏 + Markdown 正文（设计稿的 flex gap；折行悬挂缩进）。
+
+    不能把 ⏺ 拼进 Markdown 文本：Textual 在空白处折行，长串中文前会把 ⏺ 甩到单独一行。
+    """
+    return Horizontal(Static("⏺", classes="answer-dot"), md, classes="answer-row")
+
 
 # service 层写操作被拒绝时 on_tool_result 收到的固定文案（红线 → 已拒绝样式）
 DENIED_RESULT_TEXT = DENIAL_RESULT_MESSAGE
@@ -69,6 +79,7 @@ class SlashCommand:
     name: str  # 不含 /，如 "today"
     description: str  # 中文说明
     has_args: bool = False  # 是否接受参数
+    arg: str = ""  # 菜单里的参数提示，如 "<代码>" / "[会话ID]"
 
 
 SLASH_COMMANDS: dict[str, SlashCommand] = {
@@ -78,17 +89,18 @@ SLASH_COMMANDS: dict[str, SlashCommand] = {
         SlashCommand("usmarket", "美股大盘（指数/VIX/10Y利率）"),
         SlashCommand("watch", "自选股列表"),
         SlashCommand("portfolio", "持仓"),
-        SlashCommand("flows", "资金流（/flows 600519，无参数看自选榜）", has_args=True),
-        SlashCommand("quote", "个股报价（/quote 600519）", has_args=True),
+        SlashCommand("flows", "资金流（无参数看自选榜）", has_args=True, arg="[代码]"),
+        SlashCommand("quote", "个股报价（/quote 600519）", has_args=True, arg="<代码>"),
         SlashCommand("predictions", "预测跟踪"),
         SlashCommand("signals", "近期信号"),
         SlashCommand("memory", "记忆系统"),
-        SlashCommand("resume", "恢复历史会话（/resume [id]）", has_args=True),
+        SlashCommand("resume", "恢复历史会话", has_args=True, arg="[会话ID]"),
         SlashCommand("new", "开新会话（旧会话保留在 /resume）"),
         SlashCommand("status", "服务状态"),
         SlashCommand("help", "按键速查"),
         SlashCommand("clear", "清空对话"),
-        SlashCommand("theme", "选择主题（↑↓ 实时预览；/theme 名称 直接选中）"),
+        SlashCommand("theme", "选择主题（↑↓ 实时预览；/theme 名称 直接选中）", arg="[名称]"),
+        SlashCommand("tools", "显示 / 隐藏右侧工具调用时间线"),
         SlashCommand("quit", "退出"),
     ]
 }
@@ -162,8 +174,7 @@ class ChatInput(Input):
             event.stop()
 
     def _chat_view(self) -> ChatView | None:
-        parent = self.parent
-        return parent if isinstance(parent, ChatView) else None
+        return next((a for a in self.ancestors if isinstance(a, ChatView)), None)
 
 
 class ChatView(Vertical):
@@ -213,10 +224,13 @@ class ChatView(Vertical):
         with VerticalScroll(id="chat-log"):
             yield Static("", id="chat-welcome", classes="welcome-card")
         yield HintBar()
-        yield ChatInput(
-            placeholder="输入消息… (/ 命令 · @ 股票 · Esc 中断)",
-            id="prompt",
-        )
+        with Horizontal(id="prompt-row"):
+            yield Static("›", id="prompt-caret")
+            yield ChatInput(
+                placeholder="提问，或输入 / 查看命令（例：分析一下 @茅台 · /quote 600519）",
+                id="prompt",
+            )
+        yield StatusLine()
 
     def on_mount(self) -> None:
         """启动焦点落在输入框；欢迎卡先渲染骨架，数据由 app 的 worker 回填。"""
@@ -265,6 +279,17 @@ class ChatView(Vertical):
             _log.debug("服务数据拉取失败: %s", e)
             return None
 
+    def _notify_app(self, hook: str, *args: Any) -> Any:
+        """通知 App 侧栏等联动（宿主 App 没有该钩子时静默跳过）。"""
+        fn = getattr(self.app, hook, None)
+        return fn(*args) if callable(fn) else None
+
+    def _status_line(self) -> StatusLine | None:
+        try:
+            return self.query_one(StatusLine)
+        except NoMatches:
+            return None
+
     # ------------------------------------------------------------------
     # 状态管理
     # ------------------------------------------------------------------
@@ -289,6 +314,10 @@ class ChatView(Vertical):
                 self._thinking.finish()
             self._thinking = None
             self._refresh_hint_bar()
+        status = self._status_line()
+        if status is not None:
+            status.set_busy(busy, len(self._queue))
+        self._notify_app("on_chat_busy", busy)
 
     def is_cancelled(self) -> bool:
         """检查当前对话是否被取消。"""
@@ -315,7 +344,7 @@ class ChatView(Vertical):
             return
         if self._slash_matches:
             hint.show_suggestions(
-                [(c.name, c.description) for c in self._slash_matches],
+                [(c.name, c.description, c.arg) for c in self._slash_matches],
                 selected=self._slash_sel,
             )
             return
@@ -333,6 +362,7 @@ class ChatView(Vertical):
         if event.input.id != "prompt":
             return
         value = event.value
+        self._notify_app("on_chat_activity")
         # slash 选择态：/ 开头且还在输入命令名（无空格）
         if value.startswith("/") and " " not in value:
             self._slash_matches = match_slash_commands(value)
@@ -471,6 +501,14 @@ class ChatView(Vertical):
                 event.input.value = completion
                 event.input.cursor_position = len(completion)
                 return
+        # slash 菜单态：Enter 执行高亮项（需参数的命令先补全到输入框）
+        if self._slash_matches and " " not in text:
+            picked = self._slash_matches[self._slash_sel]
+            if picked.has_args and text != f"/{picked.name}":
+                event.input.value = f"/{picked.name} "
+                event.input.cursor_position = len(event.input.value)
+                return
+            text = f"/{picked.name}"
         event.input.value = ""
         # 斜杠命令拦截
         if text.startswith("/"):
@@ -501,6 +539,9 @@ class ChatView(Vertical):
         self._queue.append(text)
         if self._working is not None:
             self._working.set_queued(len(self._queue))
+        status = self._status_line()
+        if status is not None:
+            status.set_busy(self._busy, len(self._queue))
 
     def drain_queue(self) -> str | None:
         """轮次结束取出下一条排队消息（app 负责发给 agent）。"""
@@ -558,6 +599,8 @@ class ChatView(Vertical):
             self.app.action_new_session()  # type: ignore[attr-defined]
         elif cmd == "status":
             self._show_status_card()
+        elif cmd == "tools":
+            self._notify_app("action_toggle_tools")
 
     def _run_card_worker(self, builder: Callable[[], Static | None]) -> None:
         """在 worker 线程拉数据构卡片，回主线程挂载（失败显示友好错误）。"""
@@ -609,14 +652,16 @@ class ChatView(Vertical):
         log = self.query_one("#chat-log", VerticalScroll)
         with contextlib.suppress(Exception):
             log.query_one("#chat-welcome").remove()
-        log.mount(Static(f"[bold]❯ {escape(text)}[/]", classes="user-msg"))
+        log.mount(
+            Static(f"[{color(self._theme(), 'muted')}]›[/] {escape(text)}", classes="user-msg")
+        )
         log.scroll_end(animate=False)
 
     def append_assistant(self, text: str) -> None:
         """追加 Agent 回复（⏺ 前缀 + Markdown，dexter answer-box 风格）。"""
         log = self.query_one("#chat-log", VerticalScroll)
         normalized = text.lstrip("\n")
-        log.mount(Markdown(f"⏺ {normalized}", classes="assistant-msg"))
+        log.mount(answer_row(Markdown(normalized, classes="assistant-msg")))
         log.scroll_end(animate=False)
 
     def append_workflow_match(self, title: str, steps: list[str]) -> None:
@@ -721,9 +766,16 @@ class ChatView(Vertical):
             )
         for entry in entries:
             if entry.role == "user":
-                log.mount(Static(f"[bold]❯ {escape(entry.content)}[/]", classes="user-msg"))
+                log.mount(
+                    Static(
+                        f"[{color(self._theme(), 'muted')}]›[/] {escape(entry.content)}",
+                        classes="user-msg",
+                    )
+                )
             else:
-                log.mount(Markdown(f"⏺ {entry.content.lstrip(chr(10))}", classes="assistant-msg"))
+                log.mount(
+                    answer_row(Markdown(entry.content.lstrip(chr(10)), classes="assistant-msg"))
+                )
         log.scroll_end(animate=False)
 
     def mount_onboarding(self) -> None:
@@ -807,10 +859,10 @@ class ChatView(Vertical):
             self._working.clear_retry()
         self._stream_buffer = ""
         self._stream_dirty = False
-        widget = Markdown("⏺ …", classes="assistant-msg streaming")
+        widget = Markdown("…", classes="assistant-msg streaming")
         self._stream_widget = widget
         log = self.query_one("#chat-log", VerticalScroll)
-        log.mount(widget)
+        log.mount(answer_row(widget))
         log.scroll_end(animate=False)
 
     def append_chunk(self, delta: str) -> None:
@@ -825,7 +877,7 @@ class ChatView(Vertical):
             return
         self._stream_dirty = False
         text = self._stream_buffer.lstrip("\n")
-        self._stream_widget.update(f"⏺ {text}")
+        self._stream_widget.update(text)
         self.query_one("#chat-log", VerticalScroll).scroll_end(animate=False)
 
     def finalize_stream(self) -> str:
@@ -838,7 +890,10 @@ class ChatView(Vertical):
         self._stream_dirty = False
         # 如果从未收到 chunk（provider 不支持流式），移除占位 widget
         if not text and widget is not None:
-            widget.remove()
+            row = widget.parent
+            (
+                row if isinstance(row, Horizontal) and row.has_class("answer-row") else widget
+            ).remove()
         return text
 
     def set_cancel_callback(self, callback: Callable[[], None]) -> None:
@@ -954,10 +1009,18 @@ class ChatView(Vertical):
         self._busy = False
         self._cancelled = False
         self._cancel_callback = None
+        # 不经 set_busy（工作行已手动收尾），但侧栏的忙碌态必须同步复位
+        self._notify_app("on_chat_busy", False)
         log = self.query_one("#chat-log", VerticalScroll)
         await log.query("*").remove()
         log.mount(Static("", id="chat-welcome", classes="welcome-card"))
         self.update_welcome(None, None, 0, 0, self._has_agent())
+        status = self._status_line()
+        if status is not None:
+            status.set_busy(False)
+        cleared = self._notify_app("on_chat_cleared")
+        if cleared is not None:
+            await cleared
         refresh = getattr(self.app, "_refresh_market", None)
         if callable(refresh):
             refresh()
@@ -978,9 +1041,23 @@ class ChatView(Vertical):
         真取消：先触发 cancel_event（让 worker 线程在下一个检查点退出），
         再做 UI 收尾。已流出的部分保留并标注「（已中断）」。
         """
+        if self._slash_matches:
+            # / 菜单打开：Esc 放弃这条命令（清空半截的 /xx，避免随后 Enter
+            # 执行未完成的命令或 ↑ 翻历史覆盖输入）
+            self._slash_matches = []
+            prompt = self.query_one("#prompt", ChatInput)
+            prompt.value = ""
+            self._refresh_hint_bar()
+            return
+        if self._stock_matches:
+            # @ 候选打开：Esc 只关候选，正在写的句子保留
+            self._stock_matches = []
+            self._refresh_hint_bar()
+            return
         if not self._busy:
             return
         self._cancelled = True
+        self._notify_app("on_chat_interrupted")
         # 触发真取消（cancel_event.set()）
         if self._cancel_callback is not None:
             with contextlib.suppress(Exception):
@@ -991,7 +1068,7 @@ class ChatView(Vertical):
         if widget is not None:
             text = self.finalize_stream()
             if text:
-                widget.update(f"⏺ {text.lstrip()}\n\n[dim]（已中断）[/]")
+                widget.update(f"{text.lstrip()}\n\n[dim]（已中断）[/]")
         if not text:
             log = self.query_one("#chat-log", VerticalScroll)
             log.mount(
