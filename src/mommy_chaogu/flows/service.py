@@ -119,8 +119,8 @@ class FlowService:
 
     def _force_fetch_today(self, code: str) -> list[MoneyFlow]:
         """绕过 today_money_flow 节流，强制拉新。"""
-        # 重置该 code 的拉新节流（私有 API，但 CacheManager 也用这招）
-        self.adapter._last_fetch_attempt[f"today_flow:{code}"] = datetime.min.replace(tzinfo=UTC)
+        # 重置该 code 的拉新节流（公开契约，见 CachedMarketDataAdapter.reset_fetch_throttle）
+        self.adapter.reset_fetch_throttle(f"today_flow:{code}")
         flows = self.adapter.get_today_money_flow(code)
         return flows
 
@@ -128,7 +128,7 @@ class FlowService:
         # 重置该 code 的 history 节流键——CachedMarketDataAdapter.get_history_money_flow
         # 现在会读这个键（`_should_fetch`），因此 force 真正绕过缓存命中分支发起拉新；
         # 此前 history 路径从不读该键，force 是空操作（Q1 资金流收口修复）。
-        self.adapter._last_fetch_attempt[f"history_flow:{code}"] = datetime.min.replace(tzinfo=UTC)
+        self.adapter.reset_fetch_throttle(f"history_flow:{code}")
         flows = self.adapter.get_history_money_flow(code, days=days)
         return flows
 
@@ -341,7 +341,7 @@ class FlowService:
         out: dict[str, tuple[str, Decimal]] = {}
         # 强制重置节流（让监控模式能每轮都拿到最新市值）
         for code in codes:
-            self.adapter._last_fetch_attempt[f"quote:{code}"] = datetime.min.replace(tzinfo=UTC)
+            self.adapter.reset_fetch_throttle(f"quote:{code}")
         for code in codes:
             try:
                 q = self.adapter.get_quote(code)

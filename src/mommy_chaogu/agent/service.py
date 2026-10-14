@@ -52,13 +52,25 @@ CONFIRM_BY_ACTION: dict[str, frozenset[str]] = {
 # 拒绝时 on_tool_result 收到的固定文案（TUI 据此渲染「已拒绝」红线）
 DENIAL_RESULT_MESSAGE = "用户拒绝了该操作"
 
+# 回传 LLM 的拒绝结果 JSON 带 "denied": true 结构化标志（保留原文案，
+# 供模型与 UI 用字段而非字符串等值识别拒绝）
 _DENIAL_RESULT = json.dumps(
     {
+        "denied": True,
         "error": DENIAL_RESULT_MESSAGE,
         "hint": "不要重试同一操作；向用户说明情况并等待新的指示",
     },
     ensure_ascii=False,
 )
+
+
+def is_denial_result(digest: str) -> bool:
+    """on_tool_result 的 digest 是否为写操作被用户拒绝的固定文案。
+
+    DENIED 契约的判定入口：字符串等值只在本模块（常量定义处）发生，
+    宿主 UI（TUI / Web ws）据此把工具状态标成 denied 而非 failed。
+    """
+    return digest == DENIAL_RESULT_MESSAGE
 
 
 def requires_confirmation(fn_name: str, fn_args: dict[str, Any]) -> bool:

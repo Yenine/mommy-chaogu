@@ -280,6 +280,7 @@ mommy-chaogu 是直接服务最终用户的应用，不是为其他应用提供�
 - 数据金额一律 `Decimal`，不用 `float`
 - 数据源走 `MarketDataAdapter` Protocol，加新源只实现 Protocol
 - provider 配置只改 `agent/llm.py` 的 `SUPPORTED_PROVIDERS`（service/config/backtest/MCP 全部引用它）；LLM client 一律经 `llm.create_client()` 构造（显式 timeout + 关 SDK 内置重试，重试由应用层统一）
+- adapter/services 单例组装与同进程共享：一个进程只组装一条 `CachedMarketDataAdapter` 链并向下注入（TUI `tui/services/bootstrap.py`、Web `web/deps.py`、CLI `cli.py`/`workflow/assembly.py`），需要 adapter/store 的高层服务接收注入而不是 `from_default` 另起一条链——双实例各持节流与来源标注状态，互相不可见；强制拉新走 `reset_fetch_throttle(key)`，来源标签走 `source_snapshot()` 快照，不直改实例私有字段
 - 新增 agent 工具：在 `agent/tools/` 对应域模块（quote/sector/flows/bars/holdings/intel/alerts/memory/themes）的 `DEFS` 与 `HANDLERS` 各加一项，`registry.py` 自动聚合（import 时校验两边名字一致），无需改注册表
 - 拉新失败保留旧数据（数据库是唯一真相源）
 - 新增模块在 `db_paths.py` 里定义数据库路径，不要硬编码

@@ -35,7 +35,6 @@ import type { Msg, ToolCall, TurnInfo } from '@/lib/messages'
 import { THEME_LABELS, isTheme, loadTheme, saveTheme, themeList, type ThemeName } from '@/lib/themes'
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const DENIED = '用户拒绝了该操作'
 const PANEL_W = 420
 
 // ---------------------------------------------------------------- 状态
@@ -103,12 +102,12 @@ const agent = new AgentSocket({
     tools.value.push(t)
     msgs.value.push({ kind: 'tool', id: t.id })
   },
-  toolFinished(name, ok, elapsedMs, result) {
+  toolFinished(name, status, elapsedMs, result) {
     const t = tools.value.find((x) => x.turn === turnNo && x.name === name && x.status === 'running')
     if (!t) return
     t.end = elapsedMs && t.start ? t.start + elapsedMs : Date.now()
     t.result = result
-    t.status = ok ? 'done' : result === DENIED ? 'denied' : 'failed'
+    t.status = status
     if (t.status === 'failed') mascotEvent.value = { kind: 'fail', at: Date.now() }
   },
   confirm(req) {

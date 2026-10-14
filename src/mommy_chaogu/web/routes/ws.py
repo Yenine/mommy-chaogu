@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from mommy_chaogu.agent.service import ChatCallbacks
+from mommy_chaogu.agent.service import ChatCallbacks, is_denial_result
 from mommy_chaogu.preferences import default_preferences
 from mommy_chaogu.web.agent_context import AgentPageContext, page_context_addendum
 from mommy_chaogu.web.background import BackgroundService, get_service
@@ -172,7 +172,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     - {"type": "thinking"}                                     一次（本轮开始）
     - {"type": "thinking_delta", "text": "..."}                推理模型的思考流（可选）
     - {"type": "tool_call_started", "tool", "args"}            每次工具执行前
-    - {"type": "tool_call_finished", "tool", "status": "done|fail", "elapsed_ms", "result"}
+    - {"type": "tool_call_finished", "tool", "status": "done|fail|denied", "elapsed_ms", "result"}
     - {"type": "confirm_required", "id", "tool", "args", "description"}  写操作执行前等待决定
     - {"type": "retry", "attempt", "max"}                      网络慢、正在重试
     - {"type": "chunk", "text": "..."}                         多次，真实 LLM delta
@@ -330,11 +330,18 @@ async def ws_agent(websocket: WebSocket) -> None:
                 _emit({"type": "tool_call_started", "tool": fn_name, "args": fn_args})
 
             def on_tool_result(fn_name: str, success: bool, elapsed_ms: int, digest: str) -> None:
+                if success:
+                    status = "done"
+                elif is_denial_result(digest):
+                    # 写操作被用户拒绝 ≠ 执行失败；前端按 denied 渲染「已拒绝」
+                    status = "denied"
+                else:
+                    status = "fail"
                 _emit(
                     {
                         "type": "tool_call_finished",
                         "tool": fn_name,
-                        "status": "done" if success else "fail",
+                        "status": status,
                         "elapsed_ms": elapsed_ms,
                         "result": digest,
                     }

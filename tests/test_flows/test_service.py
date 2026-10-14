@@ -35,12 +35,18 @@ class FakeAdapter:
 
     def __init__(self) -> None:
         self._last_fetch_attempt: dict[str, datetime] = {}
+        self.reset_keys: list[str] = []
         self._today_flows: dict[str, list[MoneyFlow]] = {}
         self._history_flows: dict[str, list[MoneyFlow]] = {}
         self._quotes: dict[str, Quote] = {}
         self._today_calls: list[str] = []
         self._history_calls: list[str] = []
         self._raise_on_today: set[str] = set()
+
+    def reset_fetch_throttle(self, key: str) -> None:
+        """与 CachedMarketDataAdapter 同契约：重置节流（记录调用供断言）。"""
+        self.reset_keys.append(key)
+        self._last_fetch_attempt.pop(key, None)
 
     def get_today_money_flow(self, code: str) -> list[MoneyFlow]:
         self._today_calls.append(code)
@@ -303,8 +309,8 @@ def test_pull_today_force_resets_throttle(service: FlowService, adapter: FakeAda
     adapter._today_flows = {"600519": [_money_flow("600519")]}
     pool = CustomPool(["600519"])
     service.pull_today(pool, force=True)
-    # force 模式会重置 _last_fetch_attempt
-    assert "today_flow:600519" in adapter._last_fetch_attempt
+    # force 走公开契约 reset_fetch_throttle（不再直改 _last_fetch_attempt）
+    assert "today_flow:600519" in adapter.reset_keys
 
 
 def test_pull_today_empty_pool(service: FlowService) -> None:

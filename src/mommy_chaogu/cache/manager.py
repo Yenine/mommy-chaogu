@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,10 +31,8 @@ class CacheManager:
 
     def warmup_market(self) -> dict[str, Any]:
         """盘前预热：拉一次全市场。"""
-        from mommy_chaogu.cache.adapter import CachedMarketDataAdapter  # noqa: F401
-
         # 强制重置拉新节流，让全市场先拉一次
-        self.adapter._last_fetch_attempt["market_snapshot:all"] = datetime.min.replace(tzinfo=UTC)
+        self.adapter.reset_fetch_throttle("market_snapshot:all")
         quotes = self.adapter.list_market_quotes()
         return {
             "ok": True,
@@ -48,10 +45,8 @@ class CacheManager:
         n_fail = 0
         # 重置节流
         for code in codes:
-            self.adapter._last_fetch_attempt[f"quote:{code}"] = datetime.min.replace(tzinfo=UTC)
-            self.adapter._last_fetch_attempt[f"today_flow:{code}"] = datetime.min.replace(
-                tzinfo=UTC
-            )
+            self.adapter.reset_fetch_throttle(f"quote:{code}")
+            self.adapter.reset_fetch_throttle(f"today_flow:{code}")
         for code in codes:
             q = self.adapter.get_quote(code)
             if q is not None:
@@ -72,12 +67,12 @@ class CacheManager:
 
     def refresh_quote(self, code: str) -> bool:
         """强制刷新单股报价。"""
-        self.adapter._last_fetch_attempt[f"quote:{code}"] = datetime.min.replace(tzinfo=UTC)
+        self.adapter.reset_fetch_throttle(f"quote:{code}")
         return self.adapter.get_quote(code) is not None
 
     def refresh_market(self) -> int:
         """强制刷新全市场。返回成功获取的 quote 数。"""
-        self.adapter._last_fetch_attempt["market_snapshot:all"] = datetime.min.replace(tzinfo=UTC)
+        self.adapter.reset_fetch_throttle("market_snapshot:all")
         quotes = self.adapter.list_market_quotes()
         return len(quotes)
 

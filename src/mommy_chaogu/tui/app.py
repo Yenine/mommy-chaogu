@@ -30,7 +30,7 @@ from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Static
 
-from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE, ChatCallbacks
+from mommy_chaogu.agent.service import ChatCallbacks, is_denial_result
 from mommy_chaogu.db_paths import DEFAULT_DATA_DIR
 from mommy_chaogu.tui.messages import StepStatus
 from mommy_chaogu.tui.screens.help import HelpScreen
@@ -849,7 +849,7 @@ class MommyTuiApp(App[None]):
         if side is not None:
             if ok:
                 status, digest = "done", format_digest(name, result)
-            elif result == DENIAL_RESULT_MESSAGE:
+            elif is_denial_result(result):
                 status, digest = "denied", "已拒绝（用户）"
             else:
                 status = "failed"

@@ -117,6 +117,24 @@ class CachedMarketDataAdapter:
     def _mark_fetched(self, key: str) -> None:
         self._last_fetch_attempt[key] = _utcnow()
 
+    def reset_fetch_throttle(self, key: str) -> None:
+        """重置某 key 的拉新节流，让下一次读取强制发起拉新（公开契约）。
+
+        key 形如 ``quote:600519`` / ``today_flow:600519`` / ``history_flow:600519``
+        / ``market_snapshot:all`` / ``bar:<code>:<interval>:<adj>``。强制拉新
+        （warmup / refresh / force）一律走本方法，不要直改 ``_last_fetch_attempt``。
+        """
+        self._last_fetch_attempt.pop(key, None)
+
+    def source_snapshot(self) -> tuple[str, str]:
+        """当前 ``(last_source, last_source_trade_date)`` 的拷贝。
+
+        调用方在完成某次读取后立即快照，之后其他方法对共享来源字段的
+        改写不会污染该快照（与 bars 的 per-key 来源先例同一意图：把
+        「这次数据从哪来」从可变实例状态里分离出来）。
+        """
+        return (self.last_source, self.last_source_trade_date)
+
     # ============================================================
     # 实时报价
     # ============================================================
@@ -720,9 +738,17 @@ class CachedMarketDataAdapter:
 
     def format_source_label(self) -> str:
         """返回用户可读的数据来源标注，如 '东方财富 实时' 或 '本地缓存'。"""
-        if not self.last_source:
+        return self.format_source_label_from(self.last_source, self.last_source_trade_date)
+
+    def format_source_label_from(self, source: str, trade_date: str) -> str:
+        """按 ``(source, trade_date)`` 快照渲染用户可读标签。
+
+        与实例当前状态解耦：调用方用 :meth:`source_snapshot` 取到的快照
+        渲染，不会被之后其他方法的改写影响（报价 + 资金流 join 场景）。
+        """
+        if not source:
             return ""
-        if self.last_source in ("network", "snapshot"):
+        if source in ("network", "snapshot"):
             inner_name = getattr(self.inner, "__class__", None)
             inner_name = inner_name.__name__ if inner_name else ""
             if "Efinance" in inner_name:
@@ -731,19 +757,19 @@ class CachedMarketDataAdapter:
                 label = "腾讯财经 实时"
             else:
                 label = "实时数据"
-        elif self.last_source == "network_empty":
+        elif source == "network_empty":
             label = "实时数据（当日无资金流数据）"
-        elif self.last_source == "network_error":
+        elif source == "network_error":
             label = "行情源不可用（无可用缓存）"
-        elif self.last_source == "cache":
+        elif source == "cache":
             label = "本地缓存"
-        elif self.last_source in ("stale_cache", "stale_snapshot"):
+        elif source in ("stale_cache", "stale_snapshot"):
             # 拉新失败后翻出的旧数据——与"刚缓存"区分，妈妈看得见可能过期
             label = "本地缓存（拉新失败，可能过期）"
         else:
-            label = self.last_source
-        if self.last_source_trade_date:
-            label = f"{label}｜数据日期 {self.last_source_trade_date}"
+            label = source
+        if trade_date:
+            label = f"{label}｜数据日期 {trade_date}"
         return label
 
 

@@ -52,13 +52,22 @@ describe('AgentSocket', () => {
     ws.emit({ type: 'done', tools_used: [], rounds: 1 })
     expect(handlers.thinkingDelta).toHaveBeenCalledWith('想')
     expect(handlers.toolStarted).toHaveBeenCalledWith('get_quote', { code: '600519' })
-    expect(handlers.toolFinished).toHaveBeenCalledWith('get_quote', false, 12, 'x')
+    expect(handlers.toolFinished).toHaveBeenCalledWith('get_quote', 'failed', 12, 'x')
     expect(handlers.confirm).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1', description: '修改自选股' }))
     expect(handlers.retry).toHaveBeenCalledWith(1, 2)
     expect(handlers.chunk).toHaveBeenCalledWith('答')
     expect(handlers.usage).toHaveBeenCalledWith({ prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 })
     expect(handlers.interrupted).toHaveBeenCalled()
     expect(handlers.done).toHaveBeenCalledTimes(1)
+  })
+
+  it('denied 状态透传给 toolFinished（写操作被拒 ≠ 失败）', async () => {
+    const { agent, sockets, handlers } = setup()
+    await agent.send('存策略卡', 'web-1')
+    sockets[0].emit({ type: 'tool_call_finished', tool: 'strategy_save', status: 'denied', elapsed_ms: 0, result: '用户拒绝了该操作' })
+    sockets[0].emit({ type: 'tool_call_finished', tool: 'get_quote', status: 'done', elapsed_ms: 5, result: '{"price": 1}' })
+    expect(handlers.toolFinished).toHaveBeenNthCalledWith(1, 'strategy_save', 'denied', 0, '用户拒绝了该操作')
+    expect(handlers.toolFinished).toHaveBeenNthCalledWith(2, 'get_quote', 'done', 5, '{"price": 1}')
   })
 
   it('确认与中断走同一连接', async () => {

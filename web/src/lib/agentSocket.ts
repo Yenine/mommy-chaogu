@@ -5,11 +5,14 @@ import { authenticatedWsUrl } from '@/api/client'
 
 export type Decision = 'allow' | 'deny' | 'always'
 
+/** tool_call_finished 的状态（后端 /ws/agent 协议：done | fail | denied） */
+export type ToolFinishStatus = 'done' | 'failed' | 'denied'
+
 export interface AgentHandlers {
   thinking?: () => void
   thinkingDelta?: (text: string) => void
   toolStarted?: (tool: string, args: Record<string, unknown>) => void
-  toolFinished?: (tool: string, ok: boolean, elapsedMs: number, result: string) => void
+  toolFinished?: (tool: string, status: ToolFinishStatus, elapsedMs: number, result: string) => void
   confirm?: (req: { id: string; tool: string; args: Record<string, unknown>; description: string }) => void
   retry?: (attempt: number, max: number) => void
   chunk?: (text: string) => void
@@ -110,9 +113,13 @@ export class AgentSocket {
       case 'tool_call_started':
         h.toolStarted?.(String(msg.tool), (msg.args ?? {}) as Record<string, unknown>)
         break
-      case 'tool_call_finished':
-        h.toolFinished?.(String(msg.tool), msg.status !== 'fail', Number(msg.elapsed_ms ?? 0), String(msg.result ?? ''))
+      case 'tool_call_finished': {
+        // denied（写操作被用户拒绝）≠ failed；未知值按 failed 兜底
+        const raw = String(msg.status ?? 'fail')
+        const status: ToolFinishStatus = raw === 'done' ? 'done' : raw === 'denied' ? 'denied' : 'failed'
+        h.toolFinished?.(String(msg.tool), status, Number(msg.elapsed_ms ?? 0), String(msg.result ?? ''))
         break
+      }
       case 'confirm_required':
         h.confirm?.({ id: String(msg.id), tool: String(msg.tool), args: msg.args ?? {}, description: String(msg.description ?? msg.tool) })
         break

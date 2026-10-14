@@ -139,7 +139,7 @@ def main() -> int:
         print("【第 4 次】东财接口抽风（连续失败 2 次）")
         mock.fail_next_n = 99  # 之后都失败
         # 重置拉新节流
-        adapter._last_fetch_attempt["quote:600519"] = datetime.min.replace(tzinfo=UTC)
+        adapter.reset_fetch_throttle("quote:600519")
         q = adapter.get_quote("600519")
         print(f"  价: {q.price if q else None} (旧缓存), 底层 fetch: {mock.fetch_count}")
         print(f"  stats: {adapter.stats_counters}")
