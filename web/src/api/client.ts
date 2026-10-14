@@ -91,6 +91,12 @@ export function getChatSessionId(): string {
   return generated
 }
 
+/** /resume <id>：切到指定会话（与终端版共用的会话 ID） */
+export function setChatSessionId(sessionId: string): void {
+  if (typeof window === 'undefined') return
+  window.sessionStorage.setItem(CHAT_SESSION_KEY, sessionId)
+}
+
 export function resetChatSessionId(): string {
   if (typeof window === 'undefined') return 'web-default'
   window.sessionStorage.removeItem(CHAT_SESSION_KEY)

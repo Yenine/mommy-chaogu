@@ -1,619 +1,179 @@
-import { expect, test, type Page } from '@playwright/test'
+// 网页版（设计稿单页）浏览器冒烟：真实 mommy-web 提供页面，REST / WebSocket 由 Playwright 模拟，
+// 覆盖设计稿的关键交互：/ 菜单、数据命令、工具时间线、写操作确认、esc 中断、主题、配对、窄屏。
+import { expect, test, type Page, type WebSocketRoute } from '@playwright/test'
 
 const quote = {
-  code: '600519',
-  name: '贵州茅台',
-  market: 'SH',
-  price: '1680.50',
-  change: '30.50',
-  change_pct: '1.85',
-  volume: 12_345_678,
-  turnover: '2000000000',
-  open: '1660.00',
-  high: '1690.00',
-  low: '1655.00',
-  prev_close: '1650.00',
-  pe: '25.6',
-  pb: '8.1',
-  turnover_rate: '0.98',
-  volume_ratio: '1.23',
-  main_net_inflow: '120000000',
-  timestamp: '2026-07-25T15:00:00Z',
-  fetched_at: '2026-07-25T15:00:01Z',
+  code: '600519', name: '贵州茅台', market: 'SH', price: '1680.50', change: '30.50', change_pct: '1.85',
+  volume: 12_345_678, turnover: '2000000000', open: '1660.00', high: '1690.00', low: '1655.00',
+  prev_close: '1650.00', pe: '25.6', pb: '8.1', turnover_rate: '0.98', volume_ratio: '1.23',
+  main_net_inflow: '120000000', timestamp: '2026-07-25T15:00:00Z', fetched_at: '2026-07-25T15:00:01Z',
   data_age_seconds: 1,
 }
 
-const secondQuote = {
-  ...quote,
-  code: '000858',
-  name: '五粮液',
-  market: 'SZ',
-  price: '122.00',
-}
-
-const overview = {
-  indexes: {
-    indexes: [
-      { name: '上证指数', price: '3388.80', change_pct: '0.65' },
-      { name: '深证成指', price: '10600.10', change_pct: '-0.20' },
-      { name: '创业板指', price: '2200.30', change_pct: '0.42' },
-      { name: '沪深300', price: '3980.00', change_pct: '0.31' },
-    ],
-    block: { status: 'ok', as_of: '2026-07-25T15:00:00Z', message: null },
-  },
-  themes: {
-    items: [
-      {
-        id: 'theme:semiconductor', source_id: 'semiconductor', kind: 'theme', name: '半导体',
-        description: '国产产业链', total_stocks: 12, reason: '观察国产替代', change_pct: '1.25',
-        leader: { code: '600519', name: '贵州茅台', change_pct: '2.10' },
-        laggard: { code: '000858', name: '五粮液', change_pct: '-0.60' },
-        anomaly: null, as_of: '2026-07-25T15:00:00Z', status: 'ok', message: null,
-      },
-      {
-        id: 'theme:innovative_drug', source_id: 'innovative_drug', kind: 'theme', name: '创新药',
-        description: '创新药产业链', total_stocks: 8, reason: '', change_pct: '-0.30',
-        leader: null, laggard: null, anomaly: null, as_of: '2026-07-25T15:00:00Z', status: 'ok', message: null,
-      },
-    ],
-    block: { status: 'ok', as_of: '2026-07-25T15:00:00Z', message: null },
-  },
-  watchlist: {
-    total: 1, n_up: 1, n_down: 0, n_flat: 0,
-    items: [{ code: '600519', name: '贵州茅台', price: '1680.50', change_pct: '1.85', group: '默认', data_age_seconds: 1 }],
-    block: { status: 'ok', as_of: '2026-07-25T15:00:00Z', message: null },
-  },
-  portfolio: {
-    n_positions: 0, total_unrealized_pnl: null, total_unrealized_pnl_pct: null, alerts: [],
-    block: { status: 'ok', as_of: '2026-07-25T15:00:00Z', message: '无持仓' },
-  },
-  signals: {
-    summary: null,
-    block: { status: 'ok', as_of: '2026-07-25T15:00:00Z', message: '暂无信号' },
-  },
-}
-
-async function mockApi(page: Page) {
-  let watchlistAdded = false
-  let basketItems = overview.themes.items.map((item, index) => ({
-    id: item.id, source_id: item.source_id, kind: item.kind, name: item.name,
-    description: item.description, total_stocks: item.total_stocks,
-    followed: true, hidden: false, sort_order: index, reason: item.reason,
-  }))
-  await page.route('**/api/**', async (route) => {
-    const request = route.request()
-    const url = new URL(request.url())
-    const path = url.pathname
-    const json = (body: unknown, status = 200) =>
-      route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
-
-    if (path === '/api/auth/status') return json({ mode: 'none', authenticated: true, llm_configured: true })
-    if (path === '/api/setup/status') return json({
-      auth_mode: 'none', llm_configured: true, provider: 'deepseek', model: 'deepseek-chat',
-      weixin: { connected: false, online: false }, data_ok: true,
-    })
-    if (path === '/api/setup/providers') return json([
-      { id: 'deepseek', label: 'DeepSeek', default_model: 'deepseek-chat', env_key: 'DEEPSEEK_API_KEY' },
-    ])
-    if (path === '/api/auth/pair' && request.method() === 'POST') return json({ ok: true, message: '配对成功' })
-    if (path === '/api/setup/weixin/start' && request.method() === 'POST') return json({
-      pairing_id: 'test-pid', qr_data_url: 'data:image/svg+xml;base64,PHN2Zy8+',
-      expires_in_seconds: 480, status: 'waiting', message: '请扫码',
-    })
-    if (path === '/api/setup/weixin/poll' && request.method() === 'POST') return json({
-      status: 'connected', message: '成功', gateway_started: true, gateway_online: true,
-    })
-    if (path === '/api/health') return json({ ok: true, adapter_name: 'Mock', uptime_seconds: 42, last_snapshot_at: null })
-    if (path === '/api/agent/history') return json({ messages: [], total: 0 })
-    if (path === '/api/agent/predictions') return json({ predictions: [], total: 0 })
-    if (path === '/api/agent/route' && request.method() === 'POST') {
-      return json({ matched: true, workflow_id: 'stock_analysis', reply: '茅台基本面稳健，注意估值与仓位。', steps: [] })
-    }
-    if (path === '/api/overview') return json(overview)
-    if (path === '/api/baskets' && request.method() === 'GET') return json(basketItems)
-    if (path.startsWith('/api/baskets/')) {
-      const parts = path.split('/')
-      const id = decodeURIComponent(parts[3] || '')
-      const item = basketItems.find(candidate => candidate.id === id)
-      if (!item) return json({ detail: '篮子不存在' }, 404)
-      if (parts[4] === 'preference' && request.method() === 'POST') {
-        const update = request.postDataJSON()
-        basketItems = basketItems.map(candidate => candidate.id === id ? { ...candidate, ...update } : candidate)
-        return json(basketItems.find(candidate => candidate.id === id))
-      }
-      if (parts[4] === 'members' && parts[6] === 'weight' && request.method() === 'POST') {
-        const update = request.postDataJSON()
-        return json({ code: parts[5], name: '贵州茅台', weight: update.weight, note: '核心观察' })
-      }
-      return json({
-        ...item,
-        change_pct: id === 'theme:semiconductor' ? '1.25' : '-0.30',
-        leader: id === 'theme:semiconductor' ? { code: '600519', name: '贵州茅台', change_pct: '2.10' } : null,
-        laggard: id === 'theme:semiconductor' ? { code: '000858', name: '五粮液', change_pct: '-0.60' } : null,
-        anomaly: null, as_of: '2026-07-25T15:00:00Z', status: 'ok', message: null,
-        members: [{ code: '600519', name: '贵州茅台', weight: null, note: '核心观察' }],
-      })
-    }
-    if (path === '/api/themes') return json({ items: overview.themes.items, total: 2 })
-    if (path === '/api/themes/semiconductor') return json({
-      ...overview.themes.items[0], subcategories: ['设备'], stocks: [{ code: '600519', name: '贵州茅台' }],
-    })
-    if (path === '/api/themes/semiconductor/quotes') return json({
-      items: [{ ...quote, subcategory: '设备', level: '设备', role: '', growth_text: '', growth_low: null, growth_high: null, core_driver: '', highlight: '' }],
-      total: 1,
-    })
-    if (path === '/api/market/indexes') {
-      return json([{ code: 'sh000001', name: '上证指数', price: '3388.80', change_pct: '0.65', prev_close: '3366.90' }])
-    }
-    if (path === '/api/market/us') {
-      return json([{ code: '^GSPC', name: '标普500', price: '7736.52', change_pct: '1.79', prev_close: '7428.78' }])
-    }
-    if (path === '/api/market/gainers' || path === '/api/market/losers' || path === '/api/market/sectors') return json([])
-    if (path === '/api/quotes') {
-      return json({ timestamp: '2026-07-25T15:00:00Z', quotes: [quote], total_main_net: '120000000', n_codes: 1, n_up: 1, n_down: 0, n_flat: 0 })
-    }
-    if (path === '/api/quotes/600519') return json(quote)
-    if (path === '/api/quotes/000858') return json(secondQuote)
-    if (path === '/api/stocks/600519/decision-context') return json({
-      code: '600519',
-      holding: {
-        position_count: 1, shares: 100, avg_cost: '1500.0000', total_cost: '150000',
-      },
-      baskets: [
-        { id: 'theme:semiconductor', name: '半导体', kind: 'theme', reason: '观察国产替代' },
-      ],
-    })
-    if (path === '/api/stocks/000858/decision-context') return json({ code: '000858', holding: null, baskets: [] })
-    if (path === '/api/quotes/600519/bars') return json([])
-    if (path === '/api/quotes/000858/bars') return json([])
-    if (path.includes('/money_flow/')) return json({ items: [], cumulative: { main_net: '0', super_net: '0', big_net: '0', medium_net: '0', small_net: '0' } })
-    if (path === '/api/signals/recent') return json([])
-    if (path === '/api/watchlist/groups') return json([{ name: '默认', description: '', n_stocks: watchlistAdded ? 1 : 0 }])
-    if (path === '/api/watchlist' && request.method() === 'GET') {
-      return json(watchlistAdded ? [{ code: '600519', name: '贵州茅台', group: '默认', note: '', added_at: '2026-07-25T15:00:00Z' }] : [])
-    }
-    if (path === '/api/watchlist/stocks' && request.method() === 'POST') {
-      watchlistAdded = true
-      return json({ code: '600519', name: '贵州茅台', group: '默认', note: '', added_at: '2026-07-25T15:00:00Z' }, 201)
-    }
-    if (path === '/api/portfolio') return json({ positions: [], total_cost: '0', total_market_value: '0', total_unrealized_pnl: '0', total_unrealized_pnl_pct: '0', n_positions: 0 })
-    if (path === '/api/cache/stats') return json({ hits: 0, fetches: 0, fetch_ok: 0, fetch_fail: 0, miss: 0, hit_rate: 0, freshness: [] })
-    return json([])
-  })
-}
-
-test.beforeEach(async ({ page }) => {
-  await mockApi(page)
-})
-
-test('desktop starts with Today and exposes the focused navigation', async ({ page }) => {
-  await page.goto('/#/')
-  await expect(page).toHaveTitle('妈妈炒股')
-  await page.keyboard.press('Tab')
-  await expect(page.getByRole('link', { name: '跳到主要内容' })).toBeFocused()
-  await page.keyboard.press('Enter')
-  await expect(page.locator('#main-content')).toBeFocused()
-
-  const navigation = page.getByRole('navigation', { name: '主导航' })
-  await expect(navigation.getByRole('link')).toHaveCount(6)
-  await expect(navigation.getByRole('link', { name: '今日' })).toBeVisible()
-  await expect(navigation.getByRole('link', { name: '关注' })).toBeVisible()
-  await expect(navigation.getByRole('link', { name: '持仓' })).toBeVisible()
-  await expect(navigation.getByRole('link', { name: '问AI' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '今日' })).toBeVisible()
-  await expect(page.getByText('上证指数')).toBeVisible()
-  await expect(page.getByRole('link', { name: /贵州茅台/ }).first()).toBeVisible()
-
-  await navigation.getByRole('link', { name: '我的' }).click()
-  await expect(page).toHaveURL(/#\/my$/)
-  // Token UI removed — status center visible instead
-  await expect(page.getByText('⚙️ 配置状态')).toBeVisible()
-  // Theme is always visible now (not gated on authMode === 'token')
-  await expect(page.getByText('🎨 主题')).toBeVisible()
-  // No access token UI
-  await expect(page.getByText('🔐 访问令牌')).not.toBeVisible()
-})
-
-test('mobile four-tab navigation preserves a multiline chat draft', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/#/')
-
-  const mobileNav = page.getByRole('navigation', { name: '移动端主导航' })
-  await expect(mobileNav.getByRole('link')).toHaveCount(4)
-  await mobileNav.getByRole('link', { name: '问AI' }).click()
-  const prompt = page.getByRole('textbox', { name: '输入投研问题' })
-  await prompt.fill('稍后继续分析\n比亚迪')
-  await mobileNav.getByRole('link', { name: '关注' }).click()
-  await mobileNav.getByRole('link', { name: '问AI' }).click()
-  await expect(prompt).toHaveValue('稍后继续分析\n比亚迪')
-})
-
-test('mobile Today leads to detail, add-watchlist, and ask-AI loop', async ({ page }) => {
-  await page.setViewportSize({ width: 375, height: 812 })
-  await page.goto('/#/')
-
-  await page.getByRole('link', { name: '贵州茅台 1680.50 +1.85%', exact: true }).click()
-  await expect(page).toHaveURL(/#\/detail\/600519$/)
-
-  await page.getByRole('button', { name: '☆ 加自选' }).click()
-  await expect(page.getByRole('button', { name: '★ 已在自选' })).toBeVisible()
-  await page.getByRole('button', { name: '🤖 问问 AI' }).click()
-
-  await expect(page).toHaveURL(/#\/chat/)
-  await expect(page.getByText('正在结合：贵州茅台 · 概览')).toBeVisible()
-  await expect(page.getByText('结合我当前看的信息，这只股票现在最需要关注什么？')).toBeVisible()
-})
-
-test('normal Today bootstrap uses auth plus overview without setup status', async ({ page }) => {
-  const bootstrapPaths: string[] = []
-  page.on('request', (request) => {
-    const path = new URL(request.url()).pathname
-    if (path === '/api/auth/status' || path === '/api/setup/status' || path === '/api/overview') {
-      bootstrapPaths.push(path)
-    }
-  })
-
-  await page.goto('/#/')
-  await expect(page.getByRole('heading', { name: '今日' })).toBeVisible()
-  expect(bootstrapPaths.filter((path) => path === '/api/auth/status')).toHaveLength(1)
-  expect(bootstrapPaths.filter((path) => path === '/api/overview')).toHaveLength(1)
-  expect(bootstrapPaths).not.toContain('/api/setup/status')
-})
-
-test('server-owned basket preferences drive Follow and unified detail', async ({ page }) => {
-  await page.goto('/#/follow')
-  await expect(page.getByRole('heading', { name: '关注', exact: true })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '今日关注' })).toBeVisible()
-
-  const chipsCard = page.getByRole('listitem').filter({ hasText: '半导体' })
-  await chipsCard.getByPlaceholder('写一句关注理由（可选）').fill('等待景气拐点')
-  await chipsCard.getByRole('button', { name: '保存' }).click()
-  await expect(chipsCard.getByPlaceholder('写一句关注理由（可选）')).toHaveValue('等待景气拐点')
-
-  await chipsCard.getByRole('link', { name: '半导体' }).click()
-  await expect(page).toHaveURL(/#\/baskets\/theme%3Asemiconductor$/)
-  await expect(page.getByRole('heading', { name: '半导体' })).toBeVisible()
-  await expect(page.getByText('领涨')).toBeVisible()
-  await expect(page.getByRole('link', { name: /贵州茅台/ }).first()).toBeVisible()
-  await page.getByRole('spinbutton', { name: '贵州茅台权重' }).fill('25')
-  await page.getByRole('listitem').filter({ hasText: '贵州茅台' }).getByRole('button', { name: '保存' }).click()
-  await expect(page.getByRole('spinbutton', { name: '贵州茅台权重' })).toHaveValue('25')
-})
-
-test('basket to stock preserves source, holding context, and structured AI context', async ({ page }) => {
-  await page.goto('/#/baskets/theme%3Asemiconductor')
-  await page.getByRole('link', { name: '贵州茅台' }).last().click()
-
-  await expect(page).toHaveURL(/detail\/600519\?basket=theme:semiconductor/)
-  await expect(page.getByText('当前持仓')).toBeVisible()
-  await expect(page.getByText('100 股')).toBeVisible()
-  await expect(page.getByRole('link', { name: '来自 半导体' })).toBeVisible()
-
-  await page.getByRole('tab', { name: '资金' }).click()
-  await page.getByRole('button', { name: '🤖 问问 AI' }).click()
-  await expect(page.getByText('正在结合：贵州茅台 · 资金')).toBeVisible()
-})
-
-test('detail tabs lazy-load, deep-link, and reload for a new stock', async ({ page }) => {
-  const barsRequests: string[] = []
-  page.on('request', (request) => {
-    const path = new URL(request.url()).pathname
-    if (path.endsWith('/bars')) barsRequests.push(path)
-  })
-
-  await page.goto('/#/detail/600519')
-  await expect(page.getByRole('heading', { name: '贵州茅台' })).toBeVisible()
-  expect(barsRequests).toEqual([])
-
-  await page.getByRole('tab', { name: '走势' }).click()
-  await expect(page).toHaveURL(/detail\/600519\?tab=chart$/)
-  await expect.poll(() => barsRequests).toEqual(['/api/quotes/600519/bars'])
-
-  await page.getByRole('textbox', { name: '股票代码' }).fill('000858')
-  await page.getByRole('textbox', { name: '股票代码' }).press('Enter')
-  await expect(page).toHaveURL(/detail\/000858\?tab=chart$/)
-  await expect(page.getByRole('heading', { name: '五粮液' })).toBeVisible()
-  await expect.poll(() => barsRequests).toEqual([
-    '/api/quotes/600519/bars',
-    '/api/quotes/000858/bars',
-  ])
-})
-
-// ---------- WP5: 预测/回测证据动线 ----------
-
-const verifiedPredictionRow = {
-  id: 12,
-  created_at: '2026-07-20T02:00:00Z',
-  code: '600519',
-  name: '贵州茅台',
-  prediction: '看涨',
-  direction: 'up',
-  rationale: '资金面转好',
-  target_price: 1800,
-  entry_price: 1680,
-  stop_loss: 1620,
-  change_pct_at_creation: 1.2,
-  timeframe: '5d',
-  verify_after: '2026-07-25T00:00:00Z',
-  status: 'hit',
-  verified_at: '2026-07-25T08:00:00Z',
-  actual_price: 1700,
-  actual_change_pct: 1.19,
-  accuracy_score: 0.9,
-  verify_attempts: 1,
-  verify_log: null,
-  data_coverage_at_creation: JSON.stringify({ quote: true, kline: true, flow: true }),
-  data_coverage_at_verify: JSON.stringify({ quote: true, quote_age_seconds: 12, source: 'live' }),
-  source_event_id: null,
-  insight_event_id: null,
-}
-
-const pendingPredictionRow = {
-  ...verifiedPredictionRow,
-  id: 13,
-  status: 'pending',
-  verified_at: null,
-  actual_price: null,
-  actual_change_pct: null,
-  accuracy_score: null,
-  verify_after: '2099-01-01T00:00:00Z',
-  data_coverage_at_creation: null,
-  data_coverage_at_verify: null,
-}
-
-async function mockPredictionEvidence(page: Page, backtestBody: unknown) {
-  await page.route('**/api/agent/predictions**', async (route) => {
-    const path = new URL(route.request().url()).pathname
-    if (path.endsWith('/stats')) {
-      return route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({ total: 2, pending: 1, hit: 1, missed: 0, expired: 0, unverifiable: 0, hit_rate: 1 }),
-      })
-    }
-    return route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ predictions: [verifiedPredictionRow, pendingPredictionRow], total: 2 }),
-    })
-  })
-  await page.route('**/api/stocks/600519/backtest**', async (route) => {
-    return route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify(backtestBody),
-    })
-  })
-  await page.route('**/api/preferences', async (route) => {
-    return route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({
-        style: 'balanced', holding_period: 'swing', drawdown_sensitivity: 'medium',
-        notify_min_severity: 'warning', watched_rules: [], reminder_windows: [],
-        default_hold_days: 5, updated_at: null,
-      }),
-    })
-  })
-}
-
-test('decisions tab renders prediction evidence and runs the backtest panel', async ({ page }) => {
-  await mockPredictionEvidence(page, {
-    code: '600519', hold_days: 5, start_date: '2025-08-02', end_date: '2026-08-01',
-    total_signals: 12, win_rate: 0.583, avg_return_pct: 1.24,
-    max_drawdown_pct: -3.5, sharpe_ratio: 0.42, message: null,
-  })
-
-  await page.goto('/#/detail/600519?tab=decisions')
-
-  // 证据：验证时间 / 依据覆盖徽章 / 数据新鲜度 / 未记录兜底
-  await expect(page.getByText(/验证于/).first()).toBeVisible()
-  await expect(page.getByText('行情', { exact: true })).toBeVisible()
-  await expect(page.getByText('K线', { exact: true })).toBeVisible()
-  await expect(page.getByText('资金流', { exact: true })).toBeVisible()
-  await expect(page.getByText('验证数据：实时报价 · 报价年龄 12s')).toBeVisible()
-  await expect(page.getByText('未记录').first()).toBeVisible()
-
-  // 回测面板：默认持有天数 + 运行后展示指标
-  await expect(page.getByText('默认持有 5 天（可在「我的」修改）')).toBeVisible()
-  await page.getByRole('button', { name: '运行回测' }).click()
-  await expect(page.getByText('信号数')).toBeVisible()
-  await expect(page.getByText('12', { exact: true })).toBeVisible()
-  await expect(page.getByText('58.3%')).toBeVisible()
-  await expect(page.getByText('+1.24%')).toBeVisible()
-  await expect(page.getByText('-3.50%')).toBeVisible()
-  await expect(page.getByText('0.42', { exact: true })).toBeVisible()
-})
-
-test('decisions tab backtest shows the server hint when there are no signals', async ({ page }) => {
-  await mockPredictionEvidence(page, {
-    code: '600519', hold_days: 5, start_date: '2025-08-02', end_date: '2026-08-01',
-    total_signals: 0, win_rate: null, avg_return_pct: null,
-    max_drawdown_pct: null, sharpe_ratio: null, message: '历史预测信号不足，暂无法回测',
-  })
-
-  await page.goto('/#/detail/600519?tab=decisions')
-  await page.getByRole('button', { name: '运行回测' }).click()
-  await expect(page.getByText('历史预测信号不足，暂无法回测')).toBeVisible()
-})
-
-test('predictions page supports the ?code= deep link with a clearable filter chip', async ({ page }) => {
-  const requestedUrls: string[] = []
-  await page.route('**/api/agent/predictions**', async (route) => {
-    const url = new URL(route.request().url())
-    if (url.pathname.endsWith('/stats')) {
-      return route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({ total: 1, pending: 0, hit: 1, missed: 0, expired: 0, unverifiable: 0, hit_rate: 1 }),
-      })
-    }
-    requestedUrls.push(route.request().url())
-    return route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ predictions: [verifiedPredictionRow], total: 1 }),
-    })
-  })
-
-  await page.goto('/#/predictions?code=600519')
-  await expect(page.getByText('当前：600519')).toBeVisible()
-  await expect(page.getByText(/验证于/).first()).toBeVisible()
-  expect(requestedUrls.some((u) => u.includes('code=600519'))).toBe(true)
-
-  await page.getByRole('link', { name: '清除筛选' }).click()
-  await expect(page.getByText('当前：600519')).not.toBeVisible()
-  await expect.poll(() => requestedUrls.some((u) => !u.includes('code='))).toBe(true)
-})
-
-test('capture release screenshots', async ({ page }) => {
-  test.skip(!process.env.UPDATE_SCREENSHOTS, 'Only runs when refreshing README assets')
-
-  await page.setViewportSize({ width: 1440, height: 900 })
-  await page.goto('/#/')
-  await expect(page.getByRole('heading', { name: '今日' })).toBeVisible()
-  await page.screenshot({ path: '../docs/images/web-today.png', fullPage: true })
-
-  await page.setViewportSize({ width: 390, height: 844 })
-  await page.goto('/#/')
-  await expect(page.getByRole('heading', { name: '今日' })).toBeVisible()
-  await page.waitForTimeout(300)
-  await page.screenshot({ path: '../docs/images/web-today-mobile.png', fullPage: true })
-})
-
-// ---------- Phase 3B: onboarding / pairing tests ----------
-
-test('configured app /my shows status center with reconfigure targets', async ({ page }) => {
-  await page.goto('/#/my')
-  await expect(page.getByText('⚙️ 配置状态')).toBeVisible()
-  await expect(page.getByText('AI 助手')).toBeVisible()
-  await expect(page.getByText('已配置')).toBeVisible()
-  await expect(page.getByText('微信通道', { exact: true })).toBeVisible()
-  await expect(page.getByText('未连接')).toBeVisible()
-  // No token UI
-  await expect(page.getByText('🔐 访问令牌')).not.toBeVisible()
-  // Theme always visible
-  await expect(page.getByText('🎨 主题')).toBeVisible()
-  // Reconfigure links use correct labels + query params
-  const aiBtn = page.getByRole('link', { name: '重新配置 AI' })
-  await expect(aiBtn).toBeVisible()
-  await expect(aiBtn).toHaveAttribute('href', /step=ai/)
-  const wxBtn = page.getByRole('link', { name: '连接微信' })
-  await expect(wxBtn).toBeVisible()
-  await expect(wxBtn).toHaveAttribute('href', /step=weixin/)
-})
-
-test('remote pairing: redirect from normal route, code entry, transition', async ({ page }) => {
-  // State: unauthenticated pairing mode, setup/status returns 401 until paired
+async function mockApi(page: Page, opts: { auth?: 'none' | 'pairing' } = {}) {
+  const json = (body: unknown) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
   let paired = false
-  let unauthorizedSetupCalls = 0
-  await page.route('**/api/auth/status', async (route) => {
-    if (paired) {
-      await route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({ mode: 'pairing', authenticated: true }),
-      })
-    } else {
-      await route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({ mode: 'pairing', authenticated: false }),
-      })
+  await page.route('**/api/**', async (route) => {
+    const url = new URL(route.request().url())
+    const path = url.pathname
+    if (path === '/api/auth/status') {
+      const pairing = opts.auth === 'pairing' && !paired
+      return route.fulfill(json({ mode: pairing ? 'pairing' : 'none', authenticated: !pairing, llm_configured: true }))
+    }
+    if (path === '/api/auth/pair') {
+      const body = route.request().postDataJSON() as { code: string }
+      paired = body.code === '123456'
+      return route.fulfill(json({ ok: paired, message: paired ? 'ok' : '配对码无效' }))
+    }
+    if (path === '/api/agent/info') return route.fulfill(json({ configured: true, provider: 'deepseek', model: 'deepseek-chat' }))
+    if (path === '/api/health') return route.fulfill(json({ ok: true, adapter_name: 'cached(fallback(efinance,tencent))', uptime_seconds: 120, last_snapshot_at: null }))
+    if (path === '/api/agent/history') return route.fulfill(json({ messages: [], total: 0 }))
+    if (path === '/api/agent/route') return route.fulfill(json({ matched: false }))
+    if (path === '/api/agent/sessions') return route.fulfill(json({ sessions: [] }))
+    if (path === '/api/quotes/600519') return route.fulfill(json(quote))
+    return route.fulfill({ status: 404, contentType: 'application/json', body: '{"detail":"not mocked"}' })
+  })
+}
+
+/** 模拟 /ws/agent：收到提问后按协议推送一轮事件；收到的控制消息记录在 sent 里 */
+async function mockAgent(page: Page, script: (ws: WebSocketRoute, msg: Record<string, unknown>) => void) {
+  const received: Array<Record<string, unknown>> = []
+  await page.routeWebSocket(/\/ws\/agent/, (ws) => {
+    ws.onMessage((raw) => {
+      const msg = JSON.parse(String(raw)) as Record<string, unknown>
+      received.push(msg)
+      script(ws, msg)
+    })
+  })
+  return received
+}
+
+const send = (ws: WebSocketRoute, payload: object) => ws.send(JSON.stringify(payload))
+
+async function ask(page: Page, text: string) {
+  const prompt = page.getByTestId('prompt')
+  await prompt.click()
+  await prompt.fill(text)
+  await prompt.press('Enter')
+}
+
+test('首屏：品牌、欢迎卡、妈咪、空时间线；顶栏显示模型与数据源', async ({ page }) => {
+  const errors: string[] = []
+  page.on('pageerror', (e) => errors.push(e.message))
+  await mockApi(page)
+  await page.goto('/')
+  await expect(page.getByText('妈咪炒股', { exact: true })).toBeVisible()
+  await expect(page.getByText('欢迎使用')).toBeVisible()
+  await expect(page.getByTestId('mascot-say')).toHaveText('嗨～我是妈咪！')
+  await expect(page.getByText('暂无工具调用')).toBeVisible()
+  await expect(page.getByText('模型 deepseek-chat')).toBeVisible()
+  await expect(page.getByText('数据源 efinance · tencent')).toBeVisible()
+  await expect(page.getByTestId('prompt')).toBeFocused()
+  expect(errors).toEqual([])
+})
+
+test('/ 菜单：过滤、↑↓ 选择、Enter 执行；/quote 渲染表格', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/')
+  const prompt = page.getByTestId('prompt')
+  await prompt.fill('/t')
+  await expect(page.getByTestId('menu')).toContainText('/today')
+  await expect(page.getByTestId('menu')).toContainText('/theme')
+  await prompt.press('Escape')
+  await expect(page.getByTestId('menu')).toBeHidden()
+
+  await ask(page, '/quote 600519')
+  const log = page.getByTestId('chat-log')
+  await expect(log.locator('table')).toContainText('贵州茅台')
+  await expect(log.locator('td.rise')).toHaveText('+1.85%')
+})
+
+test('一轮对话：工具进时间线、写操作确认、流式回答、token 累计', async ({ page }) => {
+  await mockApi(page)
+  const received = await mockAgent(page, (ws, msg) => {
+    if (msg.message) {
+      send(ws, { type: 'thinking' })
+      send(ws, { type: 'tool_call_started', tool: 'get_quote', args: { code: '600519' } })
+      send(ws, { type: 'tool_call_finished', tool: 'get_quote', status: 'done', elapsed_ms: 640, result: '贵州茅台 1680.5 +1.85%' })
+      send(ws, { type: 'confirm_required', id: 'c1', tool: 'manage_watchlist', args: { code: '600519' }, description: '修改自选股：600519' })
+    }
+    if (msg.type === 'confirm') {
+      send(ws, { type: 'tool_call_started', tool: 'manage_watchlist', args: { code: '600519' } })
+      send(ws, { type: 'tool_call_finished', tool: 'manage_watchlist', status: 'done', elapsed_ms: 80, result: '已加入自选' })
+      send(ws, { type: 'chunk', text: '已把**贵州茅台**加入自选。' })
+      send(ws, { type: 'usage', prompt_tokens: 1000, completion_tokens: 234, total_tokens: 1234 })
+      send(ws, { type: 'done', tools_used: ['get_quote', 'manage_watchlist'], rounds: 2 })
     }
   })
-  await page.route('**/api/setup/status', async (route) => {
-    if (!paired) {
-      unauthorizedSetupCalls++
-      await route.fulfill({ status: 401, body: JSON.stringify({ detail: 'unauthorized' }) })
-    } else {
-      await route.fulfill({
-        status: 200, contentType: 'application/json',
-        body: JSON.stringify({
-          auth_mode: 'pairing', llm_configured: true, provider: 'deepseek', model: 'deepseek-chat',
-          weixin: { connected: false, online: false }, data_ok: true,
-        }),
-      })
+  await page.goto('/')
+  await ask(page, '看下茅台并加入自选')
+
+  await expect(page.getByTestId('confirm')).toContainText('修改自选股：600519')
+  await expect(page.getByTestId('mascot-say')).toContainText('确认')
+  await page.getByTestId('prompt').press('y')
+
+  await expect(page.getByTestId('confirm')).toContainText('已允许')
+  await expect(page.getByTestId('chat-log')).toContainText('已把贵州茅台加入自选。')
+  await expect(page.getByTestId('timeline-row')).toHaveCount(2)
+  await expect(page.getByTestId('timeline-stats')).toContainText('共 2')
+  await expect(page.getByText('1,234 tokens')).toBeVisible()
+  await expect(page.getByTestId('mascot-say')).toHaveText('赚到了！')
+  expect(received).toContainEqual({ type: 'confirm', id: 'c1', decision: 'allow' })
+})
+
+test('esc 中断当前轮：发出 cancel，运行中的工具标为已中断', async ({ page }) => {
+  await mockApi(page)
+  const received = await mockAgent(page, (ws, msg) => {
+    if (msg.message) {
+      send(ws, { type: 'thinking' })
+      send(ws, { type: 'tool_call_started', tool: 'get_fundamentals', args: { code: '300750' } })
+    }
+    if (msg.type === 'cancel') {
+      send(ws, { type: 'interrupted' })
+      send(ws, { type: 'done', tools_used: [], rounds: 1 })
     }
   })
-  await page.route('**/api/auth/pair', async (route) => {
-    paired = true
-    await route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ ok: true, message: '配对成功' }),
-    })
-  })
-
-  // Navigate to a normal route — should redirect to /setup
-  await page.goto('/#/market')
-  await expect(page).toHaveURL(/#\/setup/)
-  // Pairing code entry visible
-  await expect(page.getByRole('heading', { name: '输入配对码' })).toBeVisible()
-  // /setup is outside nav shell — no sidebar nav
-  await expect(page.getByRole('navigation', { name: '主导航' })).not.toBeVisible()
-  await expect(page.getByRole('navigation', { name: '移动端主导航' })).not.toBeVisible()
-  expect(unauthorizedSetupCalls).toBe(0)
-
-  // Enter code and submit
-  await page.getByRole('textbox', { name: '6 位配对码' }).fill('123456')
-  await page.getByRole('button', { name: '配对' }).click()
-
-  // After pairing, should transition to weixin step (authenticated, llm_configured)
-  await expect(page.getByRole('heading', { name: '连接微信消息通道' })).toBeVisible()
+  await page.goto('/')
+  await ask(page, '宁德时代基本面')
+  await expect(page.getByTestId('timeline-row')).toContainText('运行中')
+  await page.getByTestId('prompt').press('Escape')
+  await expect(page.getByTestId('timeline-row')).toContainText('已中断')
+  await expect(page.getByTestId('chat-log')).toContainText('已中断，可继续输入新的指令')
+  expect(received).toContainEqual({ type: 'cancel' })
 })
 
-test('setup query targets open the requested reconfiguration step outside the app shell', async ({ page }) => {
-  await page.goto('/#/setup?step=ai&returnTo=/my')
-  await expect(page.getByRole('heading', { name: '配置 AI 助手' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '连接微信消息通道' })).not.toBeVisible()
-  await expect(page.getByRole('navigation', { name: '主导航' })).not.toBeVisible()
-
-  await page.goto('/#/setup?step=weixin&returnTo=/my')
-  await expect(page.getByRole('heading', { name: '连接微信消息通道' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: '配置 AI 助手' })).not.toBeVisible()
-  await expect(page.getByRole('navigation', { name: '主导航' })).not.toBeVisible()
+test('/theme 切换主题：12 套主题的配色都生效', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/')
+  const bg = () => page.evaluate(() => getComputedStyle(document.body).backgroundColor)
+  const seen = new Set<string>([await bg()])
+  for (const t of ['light', 'tokyo-night', 'catppuccin-mocha', 'dracula', 'nord', 'gruvbox-dark', 'one-dark',
+    'github-light', 'solarized-light', 'catppuccin-latte', 'rose-pine-dawn']) {
+    await ask(page, `/theme ${t}`)
+    await expect(page.locator('html')).toHaveAttribute('data-theme', t)
+    seen.add(await bg())
+  }
+  expect(seen.size).toBe(12)
 })
 
-test('first-run without LLM config shows AI step on /setup', async ({ page }) => {
-  await page.route('**/api/auth/status', async (route) => {
-    await route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ mode: 'none', authenticated: true }),
-    })
-  })
-  await page.route('**/api/setup/status', async (route) => {
-    await route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({
-        auth_mode: 'none', llm_configured: false, provider: 'deepseek', model: '',
-        weixin: { connected: false, online: false }, data_ok: true,
-      }),
-    })
-  })
-
-  await page.goto('/#/setup')
-  await expect(page.getByRole('heading', { name: '配置 AI 助手' })).toBeVisible()
+test('远程访问：先输入配对码', async ({ page }) => {
+  await mockApi(page, { auth: 'pairing' })
+  await page.goto('/')
+  await expect(page.getByText('远程访问需要配对')).toBeVisible()
+  await ask(page, '000000')
+  await expect(page.getByText('配对码无效')).toBeVisible()
+  await ask(page, '123456')
+  await expect(page.getByText('✓ 配对成功')).toBeVisible()
+  await expect(page.getByText('模型 deepseek-chat')).toBeVisible()
 })
 
-test('Weixin start is not requested before explicit user click', async ({ page }) => {
-  await page.route('**/api/auth/status', async (route) => {
-    await route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({ mode: 'none', authenticated: true }),
-    })
-  })
-  await page.route('**/api/setup/status', async (route) => {
-    await route.fulfill({
-      status: 200, contentType: 'application/json',
-      body: JSON.stringify({
-        auth_mode: 'none', llm_configured: true, provider: 'deepseek', model: 'deepseek-chat',
-        weixin: { connected: false, online: false }, data_ok: true,
-      }),
-    })
-  })
-
-  let weixinStartCount = 0
-  page.on('request', (request) => {
-    if (request.url().includes('/api/setup/weixin/start')) weixinStartCount++
-  })
-
-  await page.goto('/#/setup')
-  await expect(page.getByRole('heading', { name: '连接微信消息通道' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '显示微信二维码' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '以后再说' })).toBeVisible()
-
-  await page.waitForTimeout(1000)
-  expect(weixinStartCount).toBe(0)
+test('手机窄屏：时间线默认收起，/tools 以浮层打开', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockApi(page)
+  await page.goto('/')
+  await expect(page.getByText('工具调用时间线', { exact: true })).toBeHidden()
+  await ask(page, '/tools')
+  await expect(page.getByText('工具调用时间线', { exact: true })).toBeVisible()
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+  expect(overflow).toBeLessThanOrEqual(0)
 })
