@@ -21,6 +21,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TextIO
 
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data import MarketDataAdapter, Quote
 from mommy_chaogu.market_data.types import MoneyFlow
 from mommy_chaogu.monitor.output import format_log_line, format_table
@@ -164,13 +165,14 @@ class Monitor:
         # 3. 对拉到的股票，回填 name
         self._backfill_names(list(quote_by_code.values()))
 
-        # 4. 拉当日资金流（取最新一点）
+        # 4. 拉当日资金流（取最新一点；每日累计取末条契约，flows/cumulative）
         flows_by_code: dict[str, MoneyFlow] = {}
         for code in codes:
             try:
                 flows = self.adapter.get_today_money_flow(code)
-                if flows:
-                    flows_by_code[code] = flows[-1]
+                latest = latest_money_flow(flows)
+                if latest is not None:
+                    flows_by_code[code] = latest
             except Exception as e:
                 _log.warning("get_today_money_flow(%s) failed: %s", code, e)
 

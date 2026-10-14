@@ -20,6 +20,7 @@ from mommy_chaogu.agent.tools.base import (
     _floatify,
     _json,
 )
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.fundamentals_api import get_fundamentals
 from mommy_chaogu.market_data.news_api import get_announcements
 from mommy_chaogu.market_data.rankings import INDEX_CODES
@@ -211,9 +212,13 @@ def _handle_screen_inflow_stocks(ctx: ToolContext, args: dict[str, Any]) -> str:
     for start in range(0, len(codes), FLOW_BATCH_SIZE):
         for code in codes[start : start + FLOW_BATCH_SIZE]:
             flows = ctx.adapter.get_today_money_flow(code)
-            if not flows:
+            latest = latest_money_flow(flows)  # 每日累计取末条契约（flows/cumulative）
+            if latest is None:
                 continue
-            latest = flows[-1]
+            # 已知口径混用（先于 P5，待单独授权修复）：主路径 main_net_ratio 是
+            # 主力净流入占**成交额**的 %；缺失时的 fallback 用占**流通市值**的 %
+            # （分母不同）补位，两者 ×100 后进同一个 ratio_bp 输出与同一阈值
+            # 比较——工具主口径是占成交额，fallback 仅在源缺失时近似。
             ratio_pct = _number(latest.main_net_ratio)
             if ratio_pct is None:
                 quote = ctx.adapter.get_quote(code)

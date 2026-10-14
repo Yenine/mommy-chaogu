@@ -18,6 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.market_data.types import Quote
 
@@ -263,9 +264,9 @@ class ThemeService:
             except Exception as e:
                 _log.warning("theme money flow failed for %s: %s", code, e)
                 continue
-            if not flows:
+            latest = latest_money_flow(flows)  # 每日累计取末条契约（flows/cumulative）
+            if latest is None:
                 continue
-            latest = flows[-1]
             for item in items_by_code[code]:
                 item["main_net_inflow"] = latest.main_net.amount
             filled += 1

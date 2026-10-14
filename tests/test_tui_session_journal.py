@@ -303,8 +303,18 @@ class TestAppSessionWiring:
             app = MommyTuiApp(services=services)  # type: ignore[arg-type]
             async with app.run_test() as pilot:
                 chat = app.query_one(ChatView)
-                ok = await self._wait_until(pilot, lambda: len(chat.query(".resume-banner")) == 1)
-                assert ok, "启动后应出现恢复横幅"
+                # answer_row(Markdown) 是构造期子节点，挂载比直接子节点
+                # （banner/user-msg Static）晚一个刷新周期——必须把
+                # assistant-msg 也纳入等待条件，不能在横幅出现后立即断言
+                ok = await self._wait_until(
+                    pilot,
+                    lambda: (
+                        len(chat.query(".resume-banner")) == 1
+                        and len(chat.query(".user-msg")) == 2
+                        and len(chat.query(".assistant-msg")) == 2
+                    ),
+                )
+                assert ok, "启动后应恢复 2 轮对话（user + assistant 各 2 条）"
                 assert len(chat.query(".user-msg")) == 2
                 assert len(chat.query(".assistant-msg")) == 2
                 # 续聊绑定：bridge 的记忆视图换到恢复的会话
