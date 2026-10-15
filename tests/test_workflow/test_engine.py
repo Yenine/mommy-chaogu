@@ -171,6 +171,8 @@ class TestWorkflowExecutor:
         assert result.steps[0].success is True
         assert result.steps[0].data == {"上证": 3200}
         assert result.succeeded is True
+        # 步骤耗时被实测记录（展示用；FakeToolRegistry 立即返回，值很小但 ≥ 0）
+        assert result.steps[0].elapsed_ms >= 0
 
     def test_multi_step_execution(self) -> None:
         tools = FakeToolRegistry(

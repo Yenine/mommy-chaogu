@@ -82,6 +82,18 @@ function table(header: string[], rows: string[][], tones?: Tone[][], note?: stri
 
 const yi = (s: string | null | undefined): string => (s ? fmtMoney(s, 'yi') : '—')
 
+/** 现价缺失语义：A 股 / 美股现价不可能 ≤ 0，0 = 上游给了空壳行情（停牌 / 退市代码的缓存行）——显示 — 而非误导性的 0.00 */
+const priceOrDash = (s: string | null | undefined): string => {
+  const n = Number(s)
+  return s == null || !Number.isFinite(n) || n <= 0 ? '—' : fmtPrice(s)
+}
+
+/** 涨跌幅跟随现价：现价缺失时 +0.00% 同样是空壳数据，一并显示 — */
+const pctOrDash = (pct: string | null | undefined, price: string | null | undefined): string => {
+  const p = Number(price)
+  return p > 0 && pct != null ? fmtPct(pct) : '—'
+}
+
 /** fetch 失败的统一文案：0 = 网络层失败，503 = 后台/上游暂不可用 */
 const UNAVAILABLE = '行情源暂时不可用，稍后重试'
 
@@ -170,7 +182,7 @@ async function watch(): Promise<Msg[]> {
   return [
     table(
       ['代码', '名称', '现价', '涨跌', '主力净额'],
-      snap.quotes.map((q) => [q.code, q.name, fmtPrice(q.price), fmtPct(q.change_pct), yi(q.main_net_inflow)]),
+      snap.quotes.map((q) => [q.code, q.name, priceOrDash(q.price), pctOrDash(q.change_pct, q.price), yi(q.main_net_inflow)]),
       snap.quotes.map((q) => ['', '', '', changeTone(q.change_pct, q.market), changeTone(q.main_net_inflow)]),
     ),
   ]
@@ -209,7 +221,7 @@ async function flows(code: string): Promise<Msg[]> {
     try {
       data = await getTodayMoneyFlow(code)
     } catch (e) {
-      return fetchFail('资金流', e)
+      return fetchFail(`资金流 ${code}`, e)
     }
     const c: MoneyFlowCumulative = data.cumulative
     const keys: Array<[keyof MoneyFlowCumulative, string]> = [
@@ -242,7 +254,7 @@ async function flows(code: string): Promise<Msg[]> {
   return [
     table(
       ['代码', '名称', '主力净额', '涨跌'],
-      ranked.map((q) => [q.code, q.name, yi(q.main_net_inflow), fmtPct(q.change_pct)]),
+      ranked.map((q) => [q.code, q.name, yi(q.main_net_inflow), pctOrDash(q.change_pct, q.price)]),
       ranked.map((q) => ['', '', changeTone(q.main_net_inflow), changeTone(q.change_pct, q.market)]),
     ),
   ]
@@ -250,16 +262,17 @@ async function flows(code: string): Promise<Msg[]> {
 
 async function quote(code: string): Promise<Msg[]> {
   if (!isStockCode(code)) return [{ kind: 'sys', text: '用法：/quote 600519 或 /quote AAPL', tone: 'warn' }]
+  const upper = code.toUpperCase()
   let q: Quote
   try {
-    q = await getQuote(code.toUpperCase())
+    q = await getQuote(upper)
   } catch (e) {
-    return fetchFail('报价', e)
+    return fetchFail(`报价 ${upper}`, e)
   }
   return [
     table(
       ['代码', '名称', '现价', '涨跌', '开', '高', '低', '成交额', 'PE'],
-      [[q.code, q.name, fmtPrice(q.price), fmtPct(q.change_pct), fmtPrice(q.open), fmtPrice(q.high), fmtPrice(q.low), fmtMoney(q.turnover, 'yi'), q.pe ?? '—']],
+      [[q.code, q.name, priceOrDash(q.price), pctOrDash(q.change_pct, q.price), priceOrDash(q.open), priceOrDash(q.high), priceOrDash(q.low), fmtMoney(q.turnover, 'yi'), q.pe ?? '—']],
       [['', '', '', changeTone(q.change_pct, q.market), '', '', '', '', '']],
       q.data_age_seconds > 600 ? `数据 ${Math.round(q.data_age_seconds / 60)} 分钟前（可能来自缓存）` : undefined,
     ),

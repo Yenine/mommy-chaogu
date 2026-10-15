@@ -64,6 +64,9 @@ class ChatResponse(BaseModel):
 
 class RouteRequest(BaseModel):
     message: str
+    # 工作流轮次要落 agent_memory（/resume 的数据源），所以这里和 ChatRequest
+    # 一样收 session_id；省缺走 web-default 保持旧行为
+    session_id: str = Field(default="web-default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class RouteResponse(BaseModel):
@@ -139,6 +142,17 @@ def _get_router() -> Any:
     return runtime.router
 
 
+def _persist_workflow_turn(memory: Any, session_id: str, message: str, reply: str) -> None:
+    """工作流轮次落 agent_memory（user + assistant 两行，同会话）。
+
+    /resume 与刷新恢复都从 agent_memory 派生；AI 对话经 AgentService.chat
+    内部写库，而工作流路径没有 agent——不在这里落库，未配置 AI Key 的
+    用户（工作流是其仅有的对话入口）永远没有可恢复的会话。
+    """
+    memory.add("user", message, session_id=session_id)
+    memory.add("assistant", reply, session_id=session_id)
+
+
 @router.post("/route", response_model=RouteResponse)
 async def route_message(req: RouteRequest) -> RouteResponse:
     """尝试工作流路由。
@@ -159,14 +173,23 @@ async def route_message(req: RouteRequest) -> RouteResponse:
             "name": s.display_name,
             "tool": s.tool_name,
             "success": s.success,
+            "elapsed_ms": s.elapsed_ms,
         }
         for s in result.steps
     ]
+    reply = result.summary or "工作流执行完成。"
+
+    # 持久化失败不影响本次结果返回（对话显示正常，只是这轮不进 /resume）
+    try:
+        memory = get_agent_memory()
+        await asyncio.to_thread(_persist_workflow_turn, memory, req.session_id, req.message, reply)
+    except Exception as exc:
+        _log.warning("工作流轮次持久化失败: %s", exc)
 
     return RouteResponse(
         matched=True,
         workflow_id=route.workflow.id,
-        reply=result.summary,
+        reply=reply,
         steps=steps_data,
     )
 

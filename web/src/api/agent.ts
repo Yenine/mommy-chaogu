@@ -6,6 +6,8 @@ export interface RouteStep {
   name: string
   tool: string
   success: boolean
+  /** 本步耗时（毫秒）；后端 engine 计时，供时间线展示 */
+  elapsed_ms?: number
 }
 
 export interface RouteResponse {
@@ -17,9 +19,14 @@ export interface RouteResponse {
 
 export async function agentRoute(
   message: string,
+  sessionId?: string,
   signal?: AbortSignal,
 ): Promise<RouteResponse> {
-  return apiPost<RouteResponse>('/api/agent/route', { message }, signal)
+  return apiPost<RouteResponse>(
+    '/api/agent/route',
+    { message, session_id: sessionId ?? getChatSessionId() },
+    signal,
+  )
 }
 
 export function getAgentHistory(limit = 50): Promise<AgentHistoryMessage[]> {
