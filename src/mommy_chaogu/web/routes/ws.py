@@ -122,6 +122,22 @@ def describe_write(name: str, args: dict[str, Any]) -> str:
     return f"{label}：{key}" if key else label
 
 
+# tool_call_finished.status 的枚举：done=成功 / fail=执行失败 / denied=写操作
+# 被用户拒绝（≠失败）。denied 的判定与 agent/service 的拒绝回传同源
+# （is_denial_result），跨层一致性由 tests/test_denied_contract.py 钉死。
+TOOL_FINISH_STATUSES: frozenset[str] = frozenset({"done", "fail", "denied"})
+
+
+def tool_finish_status(success: bool, digest: str) -> str:
+    """on_tool_result 的 ``(success, digest)`` → tool_call_finished.status。"""
+    if success:
+        return "done"
+    if is_denial_result(digest):
+        # 写操作被用户拒绝 ≠ 执行失败；前端按 denied 渲染「已拒绝」
+        return "denied"
+    return "fail"
+
+
 class _Turn:
     """一轮对话的控制面：取消信号 + 待决的写操作确认（跨线程）。"""
 
@@ -330,18 +346,11 @@ async def ws_agent(websocket: WebSocket) -> None:
                 _emit({"type": "tool_call_started", "tool": fn_name, "args": fn_args})
 
             def on_tool_result(fn_name: str, success: bool, elapsed_ms: int, digest: str) -> None:
-                if success:
-                    status = "done"
-                elif is_denial_result(digest):
-                    # 写操作被用户拒绝 ≠ 执行失败；前端按 denied 渲染「已拒绝」
-                    status = "denied"
-                else:
-                    status = "fail"
                 _emit(
                     {
                         "type": "tool_call_finished",
                         "tool": fn_name,
-                        "status": status,
+                        "status": tool_finish_status(success, digest),
                         "elapsed_ms": elapsed_ms,
                         "result": digest,
                     }

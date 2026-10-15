@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ from mommy_chaogu.cache import CacheStore
 from mommy_chaogu.flows.pool import CustomPool, PoolSource
 from mommy_chaogu.flows.report import FlowReport, _fmt_bp, _fmt_pct, _fmt_yi
 from mommy_chaogu.flows.service import FlowService
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import Quote
 
 # ---------- Helpers（与 test_service 共享风格） ----------
@@ -40,7 +41,7 @@ def _flow_dict(
     code: str = "600519",
     name: str = "茅台",
     main: float = 0.0,
-    ts: str = "2026-07-06T10:00:00",
+    ts: str = "2026-07-06T10:00:00+08:00",
 ) -> dict[str, Any]:
     return {
         "code": code,
@@ -113,9 +114,7 @@ def test_generate_basic_structure(
 
     out = tmp_path / "report.md"
     report = FlowReport(service)
-    result = report.generate(
-        pool, day=__import__("datetime").date(2026, 7, 6), output=out, market_caps=market_caps
-    )
+    result = report.generate(pool, day=date(2026, 7, 6), output=out, market_caps=market_caps)
     assert result == out
     content = out.read_text(encoding="utf-8")
     # 标题
@@ -132,6 +131,74 @@ def test_generate_basic_structure(
     # 茅台流入，平安流出
     assert "茅台" in content
     assert "平安" in content
+
+
+def _beijing_days_ago(days: int) -> str:
+    return beijing_trade_date(datetime.now(UTC) - timedelta(days=days))
+
+
+def test_generate_stale_cache_not_rendered_as_today(
+    service: FlowService, store_of: CacheStore, tmp_path: Path
+) -> None:
+    """节假日生成当日报告：缓存是上一交易日的 → 标注数据日期，不当当日渲染结论。"""
+    prev_iso = _beijing_days_ago(3)
+    assert prev_iso != beijing_trade_date(datetime.now(UTC))
+    store_of.set_today_money_flow(
+        "600519", [_flow_dict("600519", "茅台", 50_000_000)], trade_date=prev_iso
+    )
+    pool = CustomPool(["600519"])
+    market_caps = {"600519": ("茅台", Decimal("100000000000"))}
+    out = tmp_path / "r.md"
+    # day 缺省 = 当日（北京交易日）
+    FlowReport(service).generate(pool, output=out, market_caps=market_caps)
+    content = out.read_text(encoding="utf-8")
+    # 显式标注数据日期
+    assert "数据日期" in content
+    assert prev_iso in content
+    # 未计入当日结论：覆盖归零、个股不出现
+    assert "0/1" in content
+    assert "茅台" not in content
+
+
+def test_generate_day_backfill_matching_cache_renders(
+    service: FlowService, store_of: CacheStore, tmp_path: Path
+) -> None:
+    """--day 补历史：缓存数据日期 == 目标日 → 照常渲染当日结论（不回归）。"""
+    target = date.fromisoformat(_beijing_days_ago(7))
+    store_of.set_today_money_flow(
+        "600519", [_flow_dict("600519", "茅台", 50_000_000)], trade_date=target.isoformat()
+    )
+    pool = CustomPool(["600519"])
+    market_caps = {"600519": ("茅台", Decimal("100000000000"))}
+    out = tmp_path / "r.md"
+    FlowReport(service).generate(pool, day=target, output=out, market_caps=market_caps)
+    content = out.read_text(encoding="utf-8")
+    assert "1/1" in content
+    assert "茅台" in content
+    assert "已剔除" not in content
+
+
+def test_generate_day_backfill_mismatched_cache_annotates_data_date(
+    service: FlowService, store_of: CacheStore, tmp_path: Path
+) -> None:
+    """--day 补历史但缓存数据日期是另一天：跳过当日校验照常渲染 + 标注数据日期。"""
+    target = date.fromisoformat(_beijing_days_ago(7))
+    cache_day = _beijing_days_ago(10)
+    assert cache_day != target.isoformat()
+    store_of.set_today_money_flow(
+        "600519", [_flow_dict("600519", "茅台", 50_000_000)], trade_date=cache_day
+    )
+    pool = CustomPool(["600519"])
+    market_caps = {"600519": ("茅台", Decimal("100000000000"))}
+    out = tmp_path / "r.md"
+    FlowReport(service).generate(pool, day=target, output=out, market_caps=market_caps)
+    content = out.read_text(encoding="utf-8")
+    # 按缓存渲染（补历史不剔除）
+    assert "1/1" in content
+    assert "茅台" in content
+    # 标注实际数据日期
+    assert "数据日期" in content
+    assert cache_day in content
 
 
 def test_generate_top_inflow_ordering(
@@ -190,13 +257,13 @@ def test_generate_contradiction_section(
     """今日 ratio > 0 但 30d 累计 ratio < 0 → 出现在矛盾股清单。"""
     # 今日流入
     store_of.set_today_money_flow(
-        "600519", [_flow_dict("600519", "茅台", 50_000_000, ts="2026-07-06T10:00:00")]
+        "600519", [_flow_dict("600519", "茅台", 50_000_000, ts="2026-07-06T10:00:00+08:00")]
     )
     # 历史 30d 累计流出（负）
     store_of.set_money_flow_history(
         "600519",
         "2026-06-01",
-        [_flow_dict("600519", "茅台", -200_000_000, ts="2026-06-01T15:00:00")],
+        [_flow_dict("600519", "茅台", -200_000_000, ts="2026-06-01T15:00:00+08:00")],
     )
     pool = CustomPool(["600519"])
     market_caps = {"600519": ("茅台", Decimal("100000000000"))}

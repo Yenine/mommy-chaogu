@@ -30,6 +30,11 @@ from mommy_chaogu.tui.services.formatting import (
 
 CARD_CLASS = "card"
 
+# bars 卡触发「旧缓存可能过期」警示的数据来源集合——必须是
+# cache/adapter.SOURCE_VALUES 的子集（tests/test_source_vocabulary.py 断言），
+# 防止词汇表演进后警示集合指向永不出现的值而静默失效。
+STALE_SOURCE_VALUES: frozenset[str] = frozenset({"stale_cache"})
+
 
 def _text(value: Any) -> str:
     """把外部数据安全嵌入 Rich markup。"""
@@ -145,7 +150,7 @@ def bars_card(bars: list[dict[str, Any]], theme: str = "dark") -> Static:
     adjustments = {str(row.get("adjustment")) for row in rows if row.get("adjustment")}
     currencies = {str(row.get("currency")) for row in rows if row.get("currency")}
     sources = {str(row.get("data_source")) for row in rows if row.get("data_source")}
-    if "stale_cache" in sources:
+    if sources & STALE_SOURCE_VALUES:
         lines.append("  [yellow]⚠ 拉新失败，当前显示旧缓存，数据可能过期[/]")
     if len(adjustments) > 1:
         lines.append("  [yellow]⚠ 当前卡片包含混合复权口径，涨跌不可直接比较[/]")
@@ -225,18 +230,25 @@ def flows_command_card(code: str, info: dict[str, Any], theme: str = "dark") -> 
 
     def _summary_line(label: str, fs: Any) -> str:
         main = _styled_flow(getattr(fs, "main_net", None), theme)
-        big = (
-            _styled_flow(getattr(fs, "big_money_net", None), theme)
-            if hasattr(fs, "big_money_net")
-            else "—"
-        )
+        big_attr = getattr(fs, "big_money_net", None)
+        # FlowSummary.big_money_net 是方法（存量实现漏了调用，真数据渲染即
+        # TypeError——值形态（mock/其它对象）保持原样）
+        if callable(big_attr):
+            big_attr = big_attr()
+        big = _styled_flow(big_attr, theme) if hasattr(fs, "big_money_net") else "—"
         ratio = getattr(fs, "main_net_ratio", None)
         ratio_str = f"{float(ratio):+.1f}%" if ratio is not None else "—"
         return f"  {label}  主力 {main}  超大+大单 {big}  占比 {ratio_str}"
 
     lines = [f"[bold cyan]💰 {name}（{code}）资金流[/]"]
     if today is not None:
-        lines.append(_summary_line("今日", today))
+        # 数据日期契约（P3）：跨交易日缓存不当「今日」，标签带数据日期
+        if info.get("today_is_current", False):
+            today_label = "今日"
+        else:
+            data_date = str(info.get("today_data_date") or "未知")
+            today_label = f"缓存(数据日期 {data_date})"
+        lines.append(_summary_line(today_label, today))
     if history is not None and days > 0:
         lines.append(_summary_line(f"近{days}日", history))
     if today is None and history is None:

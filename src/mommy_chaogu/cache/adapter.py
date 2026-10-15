@@ -33,6 +33,21 @@ from mommy_chaogu.market_data.types import (
 
 _log = logging.getLogger(__name__)
 
+#: ``last_source`` 的完整词汇表（单一真相源）：缓存装饰器对外标注的全部
+#: 取值。跨层一致性测试（tests/test_source_vocabulary.py）从本常量参数化
+#: ——TUI 警示集合、format_source_label 映射或 verify_engine 透传漏改
+#: 任一消费方时在测试失败，而不是把英文 token 裸显给用户。
+SOURCE_VALUES: tuple[str, ...] = (
+    "network",
+    "network_empty",
+    "network_error",
+    "cache",
+    "stale_cache",
+    "snapshot",
+    "stale_snapshot",
+    "",
+)
+
 # K 线交易日历：时间戳统一 aware UTC 后，直接 strftime 会把北京午夜
 # （UTC 前一天 16:00）落到错误的日期，落库 trade_date 必须按北京时区取
 # （单一真相源 market_data/time_utils.beijing_trade_date）。
@@ -92,8 +107,8 @@ class CachedMarketDataAdapter:
             "fetch_fail": 0,
             "miss": 0,
         }
-        # 最近一次数据来源（供调用方感知数据新鲜度）
-        self.last_source: str = ""  # "network", "network_empty", "network_error", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
+        # 最近一次数据来源（供调用方感知数据新鲜度；词汇表见 SOURCE_VALUES）
+        self.last_source: str = ""
         # K 线来源按请求 key 隔离；last_source 是历史兼容的展示字段，不能
         # 作为另一个 code/口径请求的状态存储。
         self._bar_last_source: dict[str, str] = {}
