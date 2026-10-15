@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getPredictionStats, getPredictions } from './predictions'
+import { getPredictions } from './predictions'
 
 describe('predictions API client', () => {
   beforeEach(() => {
@@ -57,29 +57,6 @@ describe('predictions API client', () => {
     await getPredictions(50)
     expect(fetch).toHaveBeenCalledWith(
       '/api/agent/predictions?limit=50',
-      expect.any(Object),
-    )
-  })
-
-  it('fetches prediction stats', async () => {
-    const mockStats = {
-      total: 10,
-      pending: 4,
-      hit: 4,
-      missed: 1,
-      expired: 1,
-      unverifiable: 0,
-      hit_rate: 0.8,
-    }
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify(mockStats), { status: 200 }),
-    )
-
-    const result = await getPredictionStats()
-    expect(result).toEqual(mockStats)
-    expect(result.hit_rate).toBe(0.8)
-    expect(fetch).toHaveBeenCalledWith(
-      '/api/agent/predictions/stats',
       expect.any(Object),
     )
   })

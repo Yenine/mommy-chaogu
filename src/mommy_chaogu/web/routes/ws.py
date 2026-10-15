@@ -127,6 +127,30 @@ def describe_write(name: str, args: dict[str, Any]) -> str:
 # （is_denial_result），跨层一致性由 tests/test_denied_contract.py 钉死。
 TOOL_FINISH_STATUSES: frozenset[str] = frozenset({"done", "fail", "denied"})
 
+# 本模块发出的 WS 事件类型单一真相源：新增事件必须先登记到这里，
+# tests/test_web/test_frontend_contract.py 会对照前端 agentSocket.ts 的
+# case 分支——后端加了事件类型而不改前端，CI 即红。
+# /ws/agent 一轮对话的服务端→客户端事件（消费方：web/src/lib/agentSocket.ts）
+AGENT_WS_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "thinking",
+        "thinking_delta",
+        "tool_call_started",
+        "tool_call_finished",
+        "confirm_required",
+        "retry",
+        "chunk",
+        "usage",
+        "interrupted",
+        "done",
+        "predictions_created",
+        "error",
+    }
+)
+# /ws/quotes、/ws/signals 的推送帧类型（前端页面当前走 REST 轮询，不消费
+# 这两条 socket；登记在此使「发出的事件类型都有归属」可被源码扫描断言）
+MARKET_WS_EVENT_TYPES: frozenset[str] = frozenset({"quote_update", "signal_triggered"})
+
 
 def tool_finish_status(success: bool, digest: str) -> str:
     """on_tool_result 的 ``(success, digest)`` → tool_call_finished.status。"""

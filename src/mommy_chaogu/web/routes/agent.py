@@ -73,6 +73,29 @@ class RouteResponse(BaseModel):
     steps: list[dict[str, Any]] = []
 
 
+class AgentInfoOut(BaseModel):
+    """GET /api/agent/info — 顶栏 AI 配置状态（只给名称，绝不含密钥）。"""
+
+    configured: bool
+    provider: str
+    model: str
+
+
+class AgentSessionSummaryOut(BaseModel):
+    """可恢复会话摘要单项（/resume 列表）。"""
+
+    session_id: str
+    messages: int
+    last_active: str  # ISO 8601（SessionJournal 行已 isoformat）
+    preview: str
+
+
+class AgentSessionsOut(BaseModel):
+    """GET /api/agent/sessions 响应。"""
+
+    sessions: list[AgentSessionSummaryOut] = Field(default_factory=list)
+
+
 # ---------- REST 端点 ----------
 
 # 持有最近一次构建的 runtime，热重建前 close() 释放工厂自建的
@@ -209,8 +232,8 @@ async def get_history(
         return {"messages": [], "total": 0}
 
 
-@router.get("/info")
-async def agent_info() -> dict[str, Any]:
+@router.get("/info", response_model=AgentInfoOut)
+async def agent_info() -> AgentInfoOut:
     """当前 AI 配置（顶栏「模型 xxx」）：只给是否配置 / provider / model，绝不含密钥。"""
     from mommy_chaogu.agent.llm import resolve_model, resolve_provider
     from mommy_chaogu.config import load_config
@@ -218,18 +241,18 @@ async def agent_info() -> dict[str, Any]:
     try:
         cfg = load_config().agent
         provider = resolve_provider(cfg.provider)
-        return {
-            "configured": bool(cfg.api_key),
-            "provider": provider,
-            "model": resolve_model(provider, cfg.model),
-        }
+        return AgentInfoOut(
+            configured=bool(cfg.api_key),
+            provider=provider,
+            model=resolve_model(provider, cfg.model),
+        )
     except Exception as exc:
         _log.warning("读取 AI 配置失败: %s", exc)
-        return {"configured": False, "provider": "", "model": ""}
+        return AgentInfoOut(configured=False, provider="", model="")
 
 
-@router.get("/sessions")
-async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+@router.get("/sessions", response_model=AgentSessionsOut)
+async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> AgentSessionsOut:
     """可恢复的历史会话（/resume 列表；与终端版共用 agent_memory，按最近活跃倒序）。"""
     from mommy_chaogu.tui.services.session_journal import SessionJournal
 
@@ -238,18 +261,18 @@ async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> dict[st
         rows = await asyncio.to_thread(SessionJournal(memory).sessions, limit)
     except Exception as exc:
         _log.warning("读取历史会话失败: %s", exc)
-        return {"sessions": []}
-    return {
-        "sessions": [
-            {
-                "session_id": r.session_id,
-                "messages": r.n_messages,
-                "last_active": r.last_active.isoformat(),
-                "preview": r.preview,
-            }
+        return AgentSessionsOut()
+    return AgentSessionsOut(
+        sessions=[
+            AgentSessionSummaryOut(
+                session_id=r.session_id,
+                messages=r.n_messages,
+                last_active=r.last_active.isoformat(),
+                preview=r.preview,
+            )
             for r in rows
         ]
-    }
+    )
 
 
 @router.get("/predictions")

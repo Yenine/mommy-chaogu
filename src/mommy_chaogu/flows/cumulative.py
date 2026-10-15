@@ -12,7 +12,7 @@ efinance 的当日/历史资金流每条都是到该时刻的**累计值**：同
 - agent 层：agent/tools/flows.py（单只 + 批量）、agent/tools/analysis.py
   （flow_in 筛选）、agent/monitor.py（_get_latest_flow）
 - 展示层：services/watchlist_quote_service.py、services/theme_service.py、
-  web/routes/quotes.py、monitor/poller.py（快照行回填）
+  web/mappers.py（money_flow 端点当日累计）、monitor/poller.py（快照行回填）
 - 回测：backtest/engine.py（按日回放）
 
 注意两个「ratio」口径不同，数值不可互换：
