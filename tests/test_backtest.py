@@ -207,9 +207,11 @@ def test_mcap_approximation_flagged_in_caveats(engine: BacktestEngine, store: Ca
 
     result = engine.run([code], "2026-06-01", "2026-06-05", hold_days=3)
     assert result.mcap_as_of  # 报价缓存的日期（写入刚发生，即今天）
-    assert len(result.caveats) == 3
+    assert len(result.caveats) == 4
     assert any("探索性信号收益观察" in caveat for caveat in result.caveats)
     assert any("前视" in caveat and result.mcap_as_of in caveat for caveat in result.caveats)
+    # P5：回测与实盘同用「每日末条累计」口径必须显式告知用户
+    assert any("每日末条累计" in caveat for caveat in result.caveats)
 
 
 def test_load_code_data_uses_beijing_trade_date_for_utc_midnight_bar(

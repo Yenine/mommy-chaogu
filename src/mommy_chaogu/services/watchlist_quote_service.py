@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import NotRequired, TypedDict
 
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.market_data.types import Money, MoneyFlow
 
@@ -153,8 +154,10 @@ class WatchlistQuoteService:
         """安全拉当日主力资金流，失败返回 None（线程池内逐只调用）。"""
         try:
             flows: list[MoneyFlow] = self._adapter.get_today_money_flow(code)  # type: ignore[union-attr]
-            if flows:
-                return getattr(flows[-1], "main_net", None)
+            # 每日累计取末条契约（flows/cumulative）；getattr 保持 duck-typed
+            latest = latest_money_flow(flows)
+            if latest is not None:
+                return getattr(latest, "main_net", None)
         except Exception as e:
             _log.debug("拉资金流 %s 失败: %s", code, e)
         return None

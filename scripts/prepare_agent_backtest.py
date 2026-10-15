@@ -108,7 +108,13 @@ def load_klines(market_db: Path, code: str) -> list[dict[str, Any]]:
 
 
 def load_flows(market_db: Path, code: str) -> list[dict[str, Any]]:
-    """加载某只股票的全部资金流数据，按日期排序。"""
+    """加载某只股票的全部资金流数据，按日期排序。
+
+    口径注意：flows 表的 ratio 列 = efinance「主力净流入占比」，即主力净
+    流入占**成交额**的 %（5.2 = 5.2%）；不是 flows 域/回测引擎的 ratio
+    （主力净流入÷流通市值，bp 口径）。按真实口径输出 main_net_pct，
+    数据包 meta 里有同款说明，不得再标回 ratio_bp。
+    """
     conn = sqlite3.connect(str(market_db))
     cur = conn.cursor()
     cur.execute(
@@ -122,7 +128,7 @@ def load_flows(market_db: Path, code: str) -> list[dict[str, Any]]:
         {
             "date": date,
             "main_net": round(main_net, 0) if main_net else 0,
-            "ratio_bp": round(ratio, 1) if ratio else 0.0,
+            "main_net_pct": round(ratio, 1) if ratio else 0.0,
         }
         for date, main_net, ratio in rows
     ]
@@ -267,6 +273,11 @@ def run(args: argparse.Namespace) -> int:
                     "total_predictions": len(data_package),
                     "context_kline_days": CONTEXT_KLINE_DAYS,
                     "verify_horizon": VERIFY_HORIZON,
+                    "flows_field_note": (
+                        "context_flows[].main_net_pct = 主力净流入占当日成交额 %"
+                        "（efinance 主力净流入占比）；不是 flows 域/回测的 ratio"
+                        "（主力净流入÷流通市值，bp 口径），两者分母与量级不同"
+                    ),
                 },
                 "predictions_needed": data_package,
             },
