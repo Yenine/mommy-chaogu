@@ -40,6 +40,9 @@
 
 ### 新增
 
+- `mommy --version`——主入口支持版本号自报：打印与 `version.py` 单一真相源一致的
+  版本号后直接退出（不进 REPL / 配置向导、不读 stdin）。此前该参数落入「未识别参数
+  被忽略」路径继续启动，AGENTS.md 发版条件中的 `mommy --version` 自报检查实际不可用。
 - **网页对话支持写操作确认、Esc 中断、思考过程与 token 用量**——`/ws/agent` 新增
   `confirm_required` / `confirm`（允许 / 拒绝 / 本会话不再询问）、`cancel` → `interrupted`、
   `thinking_delta`、`retry`、`usage` 事件；原有事件格式不变。控制消息由独立读取任务处理，
