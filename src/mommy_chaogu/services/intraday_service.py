@@ -27,14 +27,12 @@ import logging
 from datetime import time
 from decimal import Decimal
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING, beijing_trade_date
 from mommy_chaogu.market_data.types import Bar, BarInterval
 
 _log = logging.getLogger(__name__)
-
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
 
 # 5 分钟 K：A 股一天 48 根（09:30-11:30 + 13:00-15:00）
 BARS_PER_DAY = 48
@@ -72,7 +70,7 @@ class IntradayService:
 
     # ---------- 数据入口 ----------
 
-    def _load_day_bars(self, code: str) -> dict[str, list[Bar]]:
+    def _load_day_bars(self, code: str) -> dict[str, list[Bar]] | None:
         """拉 5 分钟 K → {北京交易日: 当日 bars（按时间升序）}。"""
         try:
             bars = self._adapter.get_bars(
@@ -81,15 +79,24 @@ class IntradayService:
         except Exception as e:
             _log.warning("intraday fetch m5 bars(%s) failed: %s", code, e)
             return {}
+        bars = bars or []
+        if not bars:
+            return {}
+        adjustments = {bar.adjustment.value for bar in bars}
+        currencies = {bar.turnover.currency for bar in bars}
+        if len(adjustments) > 1 or len(currencies) > 1:
+            _log.warning(
+                "intraday bars(%s) contain mixed semantics: adjustment=%s currency=%s",
+                code,
+                sorted(adjustments),
+                sorted(currencies),
+            )
+            return None
         by_day: dict[str, list[Bar]] = {}
         for bar in bars:
-            ts = bar.timestamp
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=_TZ_BEIJING)
-            day = ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
-            by_day.setdefault(day, []).append(bar)
+            by_day.setdefault(beijing_trade_date(bar.timestamp), []).append(bar)
         for day_bars in by_day.values():
-            day_bars.sort(key=lambda b: b.timestamp)
+            day_bars.sort(key=_bar_sort_key)
         return by_day
 
     def _prev_close(self, code: str, prev_day_bars: list[Bar] | None) -> tuple[Decimal | None, str]:
@@ -195,6 +202,11 @@ class IntradayService:
             不产出假指标。
         """
         by_day = self._load_day_bars(code)
+        if by_day is None:
+            return {
+                "error": f"{code} 日内 K 线包含混合复权或币种口径，已拒绝混算",
+                "code": code,
+            }
         if not by_day:
             return {
                 "error": f"{code} 5 分钟 K 线不可得（上游无数据或网络不可达），无法给出日内画像",
@@ -215,10 +227,12 @@ class IntradayService:
 
         last_bar = day_bars[-1]
         name = next((b.name for b in day_bars if b.name), "")
+        adjustment = next(iter({bar.adjustment.value for bar in day_bars}))
+        currency = next(iter({bar.turnover.currency for bar in day_bars}))
         session_note = (
             "完整交易日（48 根）"
             if len(day_bars) >= BARS_PER_DAY
-            else f"盘中部分（{len(day_bars)} 根，截至 {last_bar.timestamp.astimezone(_TZ_BEIJING):%H:%M}）"
+            else f"盘中部分（{len(day_bars)} 根，截至 {last_bar.timestamp.astimezone(TZ_BEIJING):%H:%M}）"
         )
 
         result: dict[str, Any] = {
@@ -228,6 +242,8 @@ class IntradayService:
             "as_of": last_bar.timestamp.isoformat(),
             "session": session_note,
             "interval": BarInterval.M5.value,
+            "adjustment": adjustment,
+            "currency": currency,
             "prev_close": prev_close_used,
             "prev_close_source": prev_close_source,
             "open_half_hour": self._open_half_hour(day_bars, prev_close_used),
@@ -249,4 +265,12 @@ def _bar_time(bar: Bar) -> time:
     ts = bar.timestamp
     if ts.tzinfo is None:
         return ts.time()
-    return ts.astimezone(_TZ_BEIJING).time()
+    return ts.astimezone(TZ_BEIJING).time()
+
+
+def _bar_sort_key(bar: Bar) -> Any:
+    """排序时统一时区，兼容历史 naive 与生产 aware 时间戳。"""
+    ts = bar.timestamp
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=TZ_BEIJING)
+    return ts.astimezone(TZ_BEIJING)

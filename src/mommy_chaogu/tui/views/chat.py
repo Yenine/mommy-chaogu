@@ -28,7 +28,7 @@ from textual.css.query import NoMatches
 from textual.suggester import Suggester
 from textual.widgets import Input, Markdown, Static
 
-from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE
+from mommy_chaogu.agent.service import is_denial_result
 from mommy_chaogu.tui.messages import StepStatus
 from mommy_chaogu.tui.services.colors import color
 from mommy_chaogu.tui.services.errors import friendly_error
@@ -61,10 +61,6 @@ def answer_row(md: Markdown) -> Horizontal:
     不能把 ⏺ 拼进 Markdown 文本：Textual 在空白处折行，长串中文前会把 ⏺ 甩到单独一行。
     """
     return Horizontal(Static("⏺", classes="answer-dot"), md, classes="answer-row")
-
-
-# service 层写操作被拒绝时 on_tool_result 收到的固定文案（红线 → 已拒绝样式）
-DENIED_RESULT_TEXT = DENIAL_RESULT_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +707,7 @@ class ChatView(Vertical):
             card = render_tool_result(name, result, self._theme())
             if card is not None:
                 log.mount(card)
-        elif result == DENIED_RESULT_TEXT:
+        elif is_denial_result(result):
             # 用户在内联确认条拒绝：黄色「已拒绝」行（区别于执行出错）
             indicator.set_denied()
         else:

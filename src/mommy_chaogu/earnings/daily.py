@@ -24,11 +24,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from datetime import date, datetime, time
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.earnings.service import EarningsService
 from mommy_chaogu.earnings.signals import EarningsContext, evaluate_all
 from mommy_chaogu.earnings.types import EarningsScore
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 from mommy_chaogu.signals.custom_evaluation import builtin_alerts_only
 from mommy_chaogu.signals.types import Signal
 
@@ -42,8 +42,8 @@ __all__ = [
 
 _log = logging.getLogger(__name__)
 
-#: A 股时区（收盘调度按本地时间判断）
-MARKET_TZ = ZoneInfo("Asia/Shanghai")
+#: A 股时区（收盘调度按本地时间判断）——单一真相源 market_data/time_utils.TZ_BEIJING
+MARKET_TZ = TZ_BEIJING
 
 #: 每日运行时刻：15:00 收盘后留出缓冲
 RUN_AT = time(15, 35)

@@ -17,13 +17,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from mommy_chaogu.flows.cumulative import latest_flow_row
 from mommy_chaogu.flows.pool import PoolSource, SemiconPool
 from mommy_chaogu.flows.service import FlowService
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 
 DEFAULT_FLOWS_REPORT_DIR = Path("data/")
 
@@ -62,8 +64,18 @@ class FlowReport:
         output: Path,
         market_caps: dict[str, tuple[str, Decimal]] | None = None,
     ) -> Path:
-        """生成 markdown 报告，输出到 `output`，返回路径。"""
-        day = day or date.today()
+        """生成 markdown 报告，输出到 `output`，返回路径。
+
+        数据日期契约（P3）：当日结论只计入缓存交易日 == 目标日的数据；
+        当日生成命中跨交易日缓存（节假日/未拉新）时如实标注「数据日期为 X」
+        并剔除出当日结论。``day < 今天``（--day 补历史）跳过当日校验，按缓存
+        渲染并标注实际数据日期。取数只读缓存，不拉新（大池子报告不引入
+        网络失败路径）。
+        """
+        today_iso = beijing_trade_date(datetime.now(UTC))
+        day = day or date.fromisoformat(today_iso)
+        target_day = day.isoformat()
+        is_backfill = target_day < today_iso
         if market_caps is None:
             market_caps = self.service.get_market_caps(pool.codes())
 
@@ -73,6 +85,8 @@ class FlowReport:
         ] = []  # {code, name, main_net, ratio, chain_position, subcategory}
         history_agg: dict[str, Decimal] = {}  # code -> 30d 累计 main_net
         no_data: list[str] = []
+        data_dates: set[str] = set()  # 计入当日结论的数据实际交易日
+        stale_dates: dict[str, str] = {}  # code -> 缓存交易日（非目标日，剔除）
 
         # 拉板块 / 子分类信息（仅 semicon 池有）
         chain_info: dict[str, tuple[str, str]] = {}  # code -> (chain_position, subcategory)
@@ -91,28 +105,36 @@ class FlowReport:
             name = mcap_tuple[0]
             float_mcap = mcap_tuple[1]
 
-            # 当日
-            today_raw = self.service.store.get_today_money_flow(code)
-            if today_raw:
-                from mommy_chaogu.flows.service import _money_flow_from_dict
+            # 当日：从带 trade_date 的缓存条目取末条（不拉新）
+            entry = self.service.store.get_today_money_flow_entry(code)
+            if entry is not None and entry.flows:
+                entry_day = entry.trade_date or "未知"
+                if is_backfill or entry_day == target_day:
+                    from mommy_chaogu.flows.service import _money_flow_from_dict
 
-                last = _money_flow_from_dict(today_raw[-1])
-                main_net = last.main_net.amount
-                ratio = main_net / float_mcap if float_mcap else Decimal("0")
-                cp_tup = chain_info.get(code, ("?", "?"))
-                chain_position_val: str = cp_tup[0]
-                subcategory_val: str = cp_tup[1]
-                today_rows.append(
-                    {
-                        "code": code,
-                        "name": name,
-                        "main_net": main_net,
-                        "float_mcap": float_mcap,
-                        "ratio": ratio,
-                        "chain_position": chain_position_val,
-                        "subcategory": subcategory_val,
-                    }
-                )
+                    last_row = latest_flow_row(entry.flows)
+                    assert last_row is not None  # entry.flows 非空，末条必存在
+                    last = _money_flow_from_dict(last_row)
+                    main_net = last.main_net.amount
+                    ratio = main_net / float_mcap if float_mcap else Decimal("0")
+                    cp_tup = chain_info.get(code, ("?", "?"))
+                    chain_position_val: str = cp_tup[0]
+                    subcategory_val: str = cp_tup[1]
+                    today_rows.append(
+                        {
+                            "code": code,
+                            "name": name,
+                            "main_net": main_net,
+                            "float_mcap": float_mcap,
+                            "ratio": ratio,
+                            "chain_position": chain_position_val,
+                            "subcategory": subcategory_val,
+                        }
+                    )
+                    data_dates.add(entry_day)
+                else:
+                    # 当日生成命中跨交易日缓存：如实记录数据日期，不当当日渲染
+                    stale_dates[code] = entry_day
 
             # 历史 30d 累计
             hist_raw = self.service.store.get_money_flow_history(code)
@@ -124,8 +146,9 @@ class FlowReport:
                     flows = d.get("flows", [])
                     if not flows:
                         continue
-                    last_of_day = _money_flow_from_dict(flows[-1])
-                    agg += last_of_day.main_net.amount
+                    last_row = latest_flow_row(flows)
+                    assert last_row is not None  # flows 非空已过滤
+                    agg += _money_flow_from_dict(last_row).main_net.amount
                 history_agg[code] = agg
 
         # 2. 计算板块 / 子分类 ratio 合计
@@ -170,6 +193,19 @@ class FlowReport:
         lines.append("")
         lines.append(f"**池子**：{pool.describe()}")
         lines.append("")
+        if is_backfill and data_dates and data_dates != {target_day}:
+            shown = "、".join(sorted(data_dates))
+            lines.append(f"**数据日期**：{shown}（--day 历史补报，目标日 {day} 跳过当日校验）")
+            lines.append("")
+        if stale_dates:
+            stale_days = "、".join(sorted(set(stale_dates.values())))
+            stale_codes = list(stale_dates.keys())[:5]
+            lines.append(
+                f"**⚠️ 数据日期**：{len(stale_dates)} 只缓存数据日期为 {stale_days}，"
+                f"非当日 {day}——已剔除，未计入当日结论（当日无缓存数据，常见于节假日/未拉新；"
+                f"{stale_codes}{'...' if len(stale_dates) > 5 else ''}）"
+            )
+            lines.append("")
         lines.append(f"**覆盖**：{len(today_rows)}/{pool.codes().__len__()} 只拉到了当日数据")
         if no_data:
             lines.append(

@@ -13,28 +13,36 @@ set -eu
 
 REPOSITORY="coffee-man666/mommy-chaogu"
 
-# 默认安装最新 release（版本可复现、自报版本与实际一致）；API 不可达时退回 main。
-# 想跟踪 main 开发版，显式指定：
+# 默认安装最新 release（版本可复现、自报版本与实际一致）；API 无法解析时失败，
+# 不静默退回 main。想跟踪 main 开发版，必须显式指定：
 #   MOMMY_INSTALL_SOURCE='mommy-chaogu @ https://github.com/coffee-man666/mommy-chaogu/archive/refs/heads/main.tar.gz'
 resolve_default_source() {
     latest_tag=""
+    latest_payload=""
     if command -v curl >/dev/null 2>&1; then
-        latest_tag=$(curl -LsSf --max-time 10 \
-            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null \
-            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || latest_tag=""
+        latest_payload=$(curl -LsSf --max-time 10 \
+            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null) || return 1
     elif command -v wget >/dev/null 2>&1; then
-        latest_tag=$(wget -q -T 10 -O - \
-            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null \
-            | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1) || latest_tag=""
+        latest_payload=$(wget -q -T 10 -O - \
+            "https://api.github.com/repos/${REPOSITORY}/releases/latest" 2>/dev/null) || return 1
     fi
-    if [ -n "$latest_tag" ]; then
-        printf '%s' "mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/tags/${latest_tag}.tar.gz"
-    else
-        printf '%s' "mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/heads/main.tar.gz"
-    fi
+    latest_tag=$(printf '%s' "$latest_payload" \
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+    case "$latest_tag" in
+        v[0-9]*.[0-9]*.[0-9]*) : ;;
+        *) return 1 ;;
+    esac
+    printf '%s' "mommy-chaogu @ https://github.com/${REPOSITORY}/archive/refs/tags/${latest_tag}.tar.gz"
 }
-DEFAULT_SOURCE=$(resolve_default_source)
-PACKAGE_SOURCE=${MOMMY_INSTALL_SOURCE:-$DEFAULT_SOURCE}
+if [ -n "${MOMMY_INSTALL_SOURCE:-}" ]; then
+    # Explicit source is already a user decision; do not probe GitHub latest.
+    PACKAGE_SOURCE=$MOMMY_INSTALL_SOURCE
+else
+    PACKAGE_SOURCE=$(resolve_default_source) || {
+        printf '\033[1;31merror:\033[0m 无法解析最新 release；请检查网络，或显式设置 MOMMY_INSTALL_SOURCE。\n' >&2
+        exit 1
+    }
+fi
 PYTHON_VERSION=${MOMMY_INSTALL_PYTHON:-3.12}
 
 info() {

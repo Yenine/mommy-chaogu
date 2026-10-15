@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
-from mommy_chaogu.agent.service import ChatCallbacks
+from mommy_chaogu.agent.service import ChatCallbacks, is_denial_result
 from mommy_chaogu.preferences import default_preferences
 from mommy_chaogu.web.agent_context import AgentPageContext, page_context_addendum
 from mommy_chaogu.web.background import BackgroundService, get_service
@@ -122,6 +122,46 @@ def describe_write(name: str, args: dict[str, Any]) -> str:
     return f"{label}：{key}" if key else label
 
 
+# tool_call_finished.status 的枚举：done=成功 / fail=执行失败 / denied=写操作
+# 被用户拒绝（≠失败）。denied 的判定与 agent/service 的拒绝回传同源
+# （is_denial_result），跨层一致性由 tests/test_denied_contract.py 钉死。
+TOOL_FINISH_STATUSES: frozenset[str] = frozenset({"done", "fail", "denied"})
+
+# 本模块发出的 WS 事件类型单一真相源：新增事件必须先登记到这里，
+# tests/test_web/test_frontend_contract.py 会对照前端 agentSocket.ts 的
+# case 分支——后端加了事件类型而不改前端，CI 即红。
+# /ws/agent 一轮对话的服务端→客户端事件（消费方：web/src/lib/agentSocket.ts）
+AGENT_WS_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "thinking",
+        "thinking_delta",
+        "tool_call_started",
+        "tool_call_finished",
+        "confirm_required",
+        "retry",
+        "chunk",
+        "usage",
+        "interrupted",
+        "done",
+        "predictions_created",
+        "error",
+    }
+)
+# /ws/quotes、/ws/signals 的推送帧类型（前端页面当前走 REST 轮询，不消费
+# 这两条 socket；登记在此使「发出的事件类型都有归属」可被源码扫描断言）
+MARKET_WS_EVENT_TYPES: frozenset[str] = frozenset({"quote_update", "signal_triggered"})
+
+
+def tool_finish_status(success: bool, digest: str) -> str:
+    """on_tool_result 的 ``(success, digest)`` → tool_call_finished.status。"""
+    if success:
+        return "done"
+    if is_denial_result(digest):
+        # 写操作被用户拒绝 ≠ 执行失败；前端按 denied 渲染「已拒绝」
+        return "denied"
+    return "fail"
+
+
 class _Turn:
     """一轮对话的控制面：取消信号 + 待决的写操作确认（跨线程）。"""
 
@@ -172,7 +212,7 @@ async def ws_agent(websocket: WebSocket) -> None:
     - {"type": "thinking"}                                     一次（本轮开始）
     - {"type": "thinking_delta", "text": "..."}                推理模型的思考流（可选）
     - {"type": "tool_call_started", "tool", "args"}            每次工具执行前
-    - {"type": "tool_call_finished", "tool", "status": "done|fail", "elapsed_ms", "result"}
+    - {"type": "tool_call_finished", "tool", "status": "done|fail|denied", "elapsed_ms", "result"}
     - {"type": "confirm_required", "id", "tool", "args", "description"}  写操作执行前等待决定
     - {"type": "retry", "attempt", "max"}                      网络慢、正在重试
     - {"type": "chunk", "text": "..."}                         多次，真实 LLM delta
@@ -334,7 +374,7 @@ async def ws_agent(websocket: WebSocket) -> None:
                     {
                         "type": "tool_call_finished",
                         "tool": fn_name,
-                        "status": "done" if success else "fail",
+                        "status": tool_finish_status(success, digest),
                         "elapsed_ms": elapsed_ms,
                         "result": digest,
                     }

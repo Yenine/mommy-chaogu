@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -26,11 +27,38 @@ from mommy_chaogu.backtest.costs import (
 )
 from mommy_chaogu.backtest.metrics import max_drawdown_pct, sharpe_ratio
 from mommy_chaogu.cache.store import CacheStore
+from mommy_chaogu.flows.cumulative import latest_flow_row
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 
-# flow_in_spike 阈值 5bp = 0.0005
+# flow_in_spike 阈值 5bp = 0.0005。
+# 数值有意与 flows/signals.py default_rules() 里 flow_in_spike 的 5bp 对齐，但
+# 度量不同：这里是「日累计 ratio」（main_net ÷ 流通市值）的回放阈值，signals
+# 侧是「5 分钟 delta ratio」的盘中异动阈值。两侧刻意保持独立常量、禁止
+# import 耦合（跨域隐性依赖）；数值若要调整须双侧同步，tests/test_flows/
+# test_cumulative_contract.py 有哨兵断言。
 SPIKE_THRESHOLD = Decimal("0.0005")
 
 NO_COSTS_LABEL = "未扣减交易成本"
+
+
+def _trade_date_from_timestamp(value: Any) -> str:
+    """Return an A-share trading date from a cached bar timestamp.
+
+    Cached daily bars from market-data adapters use aware UTC timestamps at
+    Beijing midnight.  Date-only and naive values remain compatible with the
+    historic cache representation and are interpreted as Beijing wall time.
+    """
+    if isinstance(value, datetime):
+        timestamp = value
+    else:
+        raw = str(value)
+        try:
+            timestamp = datetime.fromisoformat(raw)
+        except ValueError:
+            return raw[:10]
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=TZ_BEIJING)
+    return timestamp.astimezone(TZ_BEIJING).date().isoformat()
 
 
 @dataclass
@@ -89,8 +117,7 @@ class BacktestEngine:
             return None
         bar_by_date: dict[str, dict[str, Any]] = {}
         for b in bars:
-            ts = b["timestamp"]
-            date = ts[:10]  # "2026-06-01T..." → "2026-06-01"
+            date = _trade_date_from_timestamp(b["timestamp"])
             if start_date <= date <= end_date:
                 bar_by_date[date] = b
 
@@ -106,7 +133,13 @@ class BacktestEngine:
             flow_list = entry.get("flows") or []
             if not flow_list:
                 continue
-            main_net_raw = flow_list[0].get("main_net", {})
+            # 每日累计取末条（flows/cumulative 单一实现）：同日多条记录里末条
+            # 才是当日全天累计，此前取 flow_list[0] 与实盘 flows 域口径
+            # 系统性不一致（P5 修复）
+            last_row = latest_flow_row(flow_list)
+            if last_row is None:
+                continue
+            main_net_raw = last_row.get("main_net", {})
             if isinstance(main_net_raw, dict):
                 amount = main_net_raw.get("amount", "0")
             else:
@@ -207,7 +240,13 @@ class BacktestEngine:
             data["mcap_as_of"] for data in all_data.values() if data.get("mcap_as_of") is not None
         ]
         mcap_as_of = min(mcap_dates).strftime("%Y-%m-%d") if mcap_dates else ""
-        caveats: list[str] = []
+        caveats: list[str] = [
+            "探索性信号收益观察：按日资金流信号与日 K 持有期收益汇总，"
+            "不是逐日资金占用、净值曲线或真实组合回测",
+            "未验证资金流的可见时间与同日收盘成交可行性，收益不代表可执行收益",
+            "回测与实盘同用「每日末条累计」口径（flows.cumulative 单一实现）："
+            "同日多条资金流记录一律取末条作为当日累计",
+        ]
         if mcap_as_of:
             caveats.append(
                 f"流通市值取自 {mcap_as_of} 的报价缓存：ratio=当日主力净流入÷当前市值，"

@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.flows.pool import PoolSource
 from mommy_chaogu.flows.service import FlowService
 from mommy_chaogu.flows.signals import (
@@ -32,6 +33,7 @@ from mommy_chaogu.flows.signals import (
     default_rules,
     evaluate,
 )
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 
 _log = logging.getLogger(__name__)
 
@@ -101,8 +103,11 @@ class FlowMonitor:
             if not flows:
                 n_failed += 1
                 continue
-            # 最新一条
-            last = flows[-1]
+            # 最新一条（每日累计取末条契约，flows/cumulative）
+            last = latest_money_flow(flows)
+            if last is None:
+                n_failed += 1
+                continue
             mcap_tuple = mcaps.get(code)
             if mcap_tuple is None:
                 n_failed += 1
@@ -228,6 +233,23 @@ class FlowMonitor:
             return
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            # 数据日期契约（P3）：saved_at 跨交易日（含缺失/不可解析 → 无法
+            # 证明同日）直接丢弃 last_ratios——长假后首轮的隔夜差不是
+            # 5 分钟异动，宁可重建基线也不发假信号（首轮 evaluate 拿到
+            # 空 prev，delta 规则不会触发，只建基线）。
+            saved_at = data.get("saved_at")
+            saved_day = (
+                beijing_trade_date(datetime.fromisoformat(saved_at))
+                if isinstance(saved_at, str)
+                else None
+            )
+            if saved_day != beijing_trade_date(_utcnow()):
+                _log.info(
+                    "discard flow monitor state saved_at=%s (cross/unknown trade date %s)",
+                    saved_at,
+                    saved_day,
+                )
+                return
             self._last_ratios = {k: Decimal(v) for k, v in data.get("last_ratios", {}).items()}
         except Exception as e:
             _log.warning("load state failed: %s", e)

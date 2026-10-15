@@ -2,15 +2,25 @@
 // 会话 / 主题 / 面板等界面命令由 App.vue 处理，这里只登记说明。
 
 import { getAgentHistory, getAgentInfo, listSessions } from '@/api/agent'
+import type { SessionSummary } from '@/api/agent'
 import { health } from '@/api/cache'
-import { apiGet } from '@/api/client'
+import { apiGet, toApiError } from '@/api/client'
 import { fmtMoney, fmtPct, fmtPrice, getQuote, getSnapshot, getTodayMoneyFlow } from '@/api/index'
 import { prettySource } from './format'
 import { getIndexes } from '@/api/market'
 import { getPortfolio } from '@/api/portfolio'
 import { getPredictions } from '@/api/predictions'
 import { recentSignals } from '@/api/signals'
-import type { IndexQuote } from '@/api/types'
+import type {
+  IndexQuote,
+  MoneyFlowCumulative,
+  MoneyFlowResponse,
+  PortfolioSummary,
+  Prediction,
+  Quote,
+  Signal,
+  Snapshot,
+} from '@/api/types'
 import type { Msg } from './messages'
 
 export interface Command {
@@ -72,41 +82,85 @@ function table(header: string[], rows: string[][], tones?: Tone[][], note?: stri
 
 const yi = (s: string | null | undefined): string => (s ? fmtMoney(s, 'yi') : '—')
 
+/** 现价缺失语义：A 股 / 美股现价不可能 ≤ 0，0 = 上游给了空壳行情（停牌 / 退市代码的缓存行）——显示 — 而非误导性的 0.00 */
+const priceOrDash = (s: string | null | undefined): string => {
+  const n = Number(s)
+  return s == null || !Number.isFinite(n) || n <= 0 ? '—' : fmtPrice(s)
+}
+
+/** 涨跌幅跟随现价：现价缺失时 +0.00% 同样是空壳数据，一并显示 — */
+const pctOrDash = (pct: string | null | undefined, price: string | null | undefined): string => {
+  const p = Number(price)
+  return p > 0 && pct != null ? fmtPct(pct) : '—'
+}
+
+/** fetch 失败的统一文案：0 = 网络层失败，503 = 后台/上游暂不可用 */
+const UNAVAILABLE = '行情源暂时不可用，稍后重试'
+
+function sysFail(what: string): Msg[] {
+  return [{ kind: 'sys', text: `${what}：${UNAVAILABLE}`, tone: 'fail' }]
+}
+
+/** 数据命令 fetch 失败 → 可见错误行；与「确认无数据」的空态区分，不渲染表格、不静默吞掉 */
+function fetchFail(what: string, e: unknown): Msg[] {
+  const err = toApiError(e, what)
+  return err.status === 0 || err.status === 503
+    ? sysFail(what)
+    : [{ kind: 'sys', text: `${what}：${err.friendly}`, tone: 'fail' }]
+}
+
 async function today(): Promise<Msg[]> {
-  const [indexes, snap, signals] = await Promise.all([
-    getIndexes().catch(() => [] as IndexQuote[]),
-    getSnapshot().catch(() => null),
-    recentSignals().catch(() => []),
-  ])
+  const [indexesR, snapR, signalsR] = await Promise.allSettled([getIndexes(), getSnapshot(), recentSignals()])
   const out: Msg[] = []
-  if (indexes.length) {
-    out.push(
-      table(
-        ['指数', '点位', '涨跌'],
-        indexes.slice(0, 6).map((i) => [i.name, fmtPrice(i.price), fmtPct(i.change_pct)]),
-        indexes.slice(0, 6).map((i) => ['', '', changeTone(i.change_pct)]),
-      ),
-    )
+  if (indexesR.status === 'rejected') {
+    out.push(...fetchFail('指数行情', indexesR.reason))
+  } else {
+    const indexes = indexesR.value
+    if (indexes.length) {
+      out.push(
+        table(
+          ['指数', '点位', '涨跌'],
+          indexes.slice(0, 6).map((i) => [i.name, fmtPrice(i.price), fmtPct(i.change_pct)]),
+          indexes.slice(0, 6).map((i) => ['', '', changeTone(i.change_pct)]),
+        ),
+      )
+    } else {
+      // 指数是固定清单，健康时不可能为空：后端把上游失败折叠成空列表，空 ≠ 确认无数据
+      out.push(...sysFail('指数行情'))
+    }
   }
-  if (snap) {
+  if (snapR.status === 'rejected') {
+    out.push(...fetchFail('自选快照', snapR.reason))
+  } else {
+    const snap = snapR.value
     out.push({
       kind: 'sys',
       text: `自选 ${snap.n_codes} 只 · 涨 ${snap.n_up} · 跌 ${snap.n_down} · 平 ${snap.n_flat} · 主力净额 ${yi(snap.total_main_net)}`,
     })
   }
-  out.push(
-    signals.length
-      ? table(
-          ['时间', '代码', '名称', '信号'],
-          signals.slice(0, 5).map((s) => [s.timestamp.slice(11, 16), s.code, s.name, s.title]),
-        )
-      : { kind: 'sys', text: '近期没有触发的信号' },
-  )
+  if (signalsR.status === 'rejected') {
+    out.push(...fetchFail('近期信号', signalsR.reason))
+  } else {
+    const signals = signalsR.value
+    out.push(
+      signals.length
+        ? table(
+            ['时间', '代码', '名称', '信号'],
+            signals.slice(0, 5).map((s) => [s.timestamp.slice(11, 16), s.code, s.name, s.title]),
+          )
+        : { kind: 'sys', text: '近期没有触发的信号' },
+    )
+  }
   return out
 }
 
 async function usMarket(): Promise<Msg[]> {
-  const rows = await apiGet<IndexQuote[]>('/api/market/us')
+  let rows: IndexQuote[]
+  try {
+    rows = await apiGet<IndexQuote[]>('/api/market/us')
+  } catch (e) {
+    return fetchFail('美股行情', e)
+  }
   if (!rows.length) return [{ kind: 'sys', text: '暂时拿不到美股数据', tone: 'warn' }]
   return [
     table(
@@ -118,19 +172,29 @@ async function usMarket(): Promise<Msg[]> {
 }
 
 async function watch(): Promise<Msg[]> {
-  const snap = await getSnapshot()
+  let snap: Snapshot
+  try {
+    snap = await getSnapshot()
+  } catch (e) {
+    return fetchFail('自选行情', e)
+  }
   if (!snap.quotes.length) return [{ kind: 'sys', text: '自选股为空：告诉妈咪「把茅台加入自选」即可添加' }]
   return [
     table(
       ['代码', '名称', '现价', '涨跌', '主力净额'],
-      snap.quotes.map((q) => [q.code, q.name, fmtPrice(q.price), fmtPct(q.change_pct), yi(q.main_net_inflow)]),
+      snap.quotes.map((q) => [q.code, q.name, priceOrDash(q.price), pctOrDash(q.change_pct, q.price), yi(q.main_net_inflow)]),
       snap.quotes.map((q) => ['', '', '', changeTone(q.change_pct, q.market), changeTone(q.main_net_inflow)]),
     ),
   ]
 }
 
 async function portfolio(): Promise<Msg[]> {
-  const p = await getPortfolio()
+  let p: PortfolioSummary
+  try {
+    p = await getPortfolio()
+  } catch (e) {
+    return fetchFail('持仓', e)
+  }
   if (!p.positions.length) return [{ kind: 'sys', text: '还没有持仓记录' }]
   return [
     table(
@@ -153,9 +217,14 @@ async function portfolio(): Promise<Msg[]> {
 
 async function flows(code: string): Promise<Msg[]> {
   if (code) {
-    const data = (await getTodayMoneyFlow(code)) as { cumulative?: Record<string, string> }
-    const c = data.cumulative ?? {}
-    const keys: Array<[string, string]> = [
+    let data: MoneyFlowResponse
+    try {
+      data = await getTodayMoneyFlow(code)
+    } catch (e) {
+      return fetchFail(`资金流 ${code}`, e)
+    }
+    const c: MoneyFlowCumulative = data.cumulative
+    const keys: Array<[keyof MoneyFlowCumulative, string]> = [
       ['main_net', '主力'],
       ['super_net', '超大单'],
       ['big_net', '大单'],
@@ -171,7 +240,12 @@ async function flows(code: string): Promise<Msg[]> {
       ),
     ]
   }
-  const snap = await getSnapshot()
+  let snap: Snapshot
+  try {
+    snap = await getSnapshot()
+  } catch (e) {
+    return fetchFail('自选行情', e)
+  }
   const ranked = snap.quotes
     .filter((q) => q.main_net_inflow != null)
     .sort((a, b) => Math.abs(Number(b.main_net_inflow)) - Math.abs(Number(a.main_net_inflow)))
@@ -180,7 +254,7 @@ async function flows(code: string): Promise<Msg[]> {
   return [
     table(
       ['代码', '名称', '主力净额', '涨跌'],
-      ranked.map((q) => [q.code, q.name, yi(q.main_net_inflow), fmtPct(q.change_pct)]),
+      ranked.map((q) => [q.code, q.name, yi(q.main_net_inflow), pctOrDash(q.change_pct, q.price)]),
       ranked.map((q) => ['', '', changeTone(q.main_net_inflow), changeTone(q.change_pct, q.market)]),
     ),
   ]
@@ -188,11 +262,17 @@ async function flows(code: string): Promise<Msg[]> {
 
 async function quote(code: string): Promise<Msg[]> {
   if (!isStockCode(code)) return [{ kind: 'sys', text: '用法：/quote 600519 或 /quote AAPL', tone: 'warn' }]
-  const q = await getQuote(code.toUpperCase())
+  const upper = code.toUpperCase()
+  let q: Quote
+  try {
+    q = await getQuote(upper)
+  } catch (e) {
+    return fetchFail(`报价 ${upper}`, e)
+  }
   return [
     table(
       ['代码', '名称', '现价', '涨跌', '开', '高', '低', '成交额', 'PE'],
-      [[q.code, q.name, fmtPrice(q.price), fmtPct(q.change_pct), fmtPrice(q.open), fmtPrice(q.high), fmtPrice(q.low), fmtMoney(q.turnover, 'yi'), q.pe ?? '—']],
+      [[q.code, q.name, priceOrDash(q.price), pctOrDash(q.change_pct, q.price), priceOrDash(q.open), priceOrDash(q.high), priceOrDash(q.low), fmtMoney(q.turnover, 'yi'), q.pe ?? '—']],
       [['', '', '', changeTone(q.change_pct, q.market), '', '', '', '', '']],
       q.data_age_seconds > 600 ? `数据 ${Math.round(q.data_age_seconds / 60)} 分钟前（可能来自缓存）` : undefined,
     ),
@@ -200,7 +280,12 @@ async function quote(code: string): Promise<Msg[]> {
 }
 
 async function predictions(): Promise<Msg[]> {
-  const rows = await getPredictions(10)
+  let rows: Prediction[]
+  try {
+    rows = await getPredictions(10)
+  } catch (e) {
+    return fetchFail('预测记录', e)
+  }
   if (!rows.length) return [{ kind: 'sys', text: '还没有预测记录：和妈咪聊个股观点时会自动记录' }]
   return [
     table(
@@ -218,7 +303,12 @@ async function predictions(): Promise<Msg[]> {
 }
 
 async function signals(): Promise<Msg[]> {
-  const rows = await recentSignals()
+  let rows: Signal[]
+  try {
+    rows = await recentSignals()
+  } catch (e) {
+    return fetchFail('近期信号', e)
+  }
   if (!rows.length) return [{ kind: 'sys', text: '近期没有触发的信号' }]
   return [
     table(
@@ -233,13 +323,19 @@ async function status(): Promise<Msg[]> {
   const lines = [
     `服务     ${h?.ok ? '运行中' : '不可用'}${h ? ` · 已运行 ${Math.round(h.uptime_seconds / 60)} 分钟` : ''}`,
     `数据源   ${h?.adapter_name ? prettySource(h.adapter_name) : '—'}`,
-    `AI       ${info?.configured ? `${info.provider} · ${info.model}` : '未配置（在终端运行 mommy setup）'}`,
+    // info 为 null 是读取失败（≠ 未配置），不能提示用户去 setup
+    `AI       ${info ? (info.configured ? `${info.provider} · ${info.model}` : '未配置（在终端运行 mommy setup）') : '暂不可用'}`,
   ]
   return [{ kind: 'sys', text: lines.join('\n') }]
 }
 
 async function sessions(): Promise<Msg[]> {
-  const rows = await listSessions(15)
+  let rows: SessionSummary[]
+  try {
+    rows = await listSessions(15)
+  } catch (e) {
+    return fetchFail('会话列表', e)
+  }
   if (!rows.length) return [{ kind: 'sys', text: '暂无可恢复的会话' }]
   return [
     table(

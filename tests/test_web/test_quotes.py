@@ -70,10 +70,30 @@ class TestGetBars:
         assert resp.status_code == 200
         bars = resp.json()
         assert len(bars) == 3  # mock 返回 3 根
+        assert bars[0]["trade_date"] == "2026-06-27"
+        assert bars[0]["adjustment"] == "forward"
+        assert bars[0]["currency"] == "CNY"
 
     def test_custom_interval_and_limit(self, client: TestClient) -> None:
         resp = client.get("/api/quotes/600519/bars?interval=5m&limit=30")
         assert resp.status_code == 200
+
+    def test_mixed_bar_adjustment_is_rejected(
+        self, client: TestClient, mock_adapter: MagicMock
+    ) -> None:
+        from dataclasses import replace
+
+        from mommy_chaogu.market_data.types import AdjustmentType
+        from tests.test_web.conftest import make_bar
+
+        forward = make_bar()
+        none = replace(forward, adjustment=AdjustmentType.NONE)
+        mock_adapter.get_bars.return_value = [forward, none]
+
+        resp = client.get("/api/quotes/600519/bars")
+
+        assert resp.status_code == 503
+        assert "混合" in resp.json()["detail"]
 
     def test_limit_out_of_range(self, client: TestClient) -> None:
         resp = client.get("/api/quotes/600519/bars?limit=0")
@@ -120,14 +140,46 @@ class TestGetMoneyFlow:
     def test_empty_list(self, client: TestClient, mock_adapter: MagicMock) -> None:
         mock_adapter.get_today_money_flow.return_value = []
         resp = client.get("/api/quotes/600519/money_flow/today")
+        assert resp.status_code == 503
+        assert "不可用" in resp.json()["detail"]
+
+    def test_exception_is_unavailable(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        mock_adapter.get_today_money_flow.side_effect = ConnectionError("offline")
+        resp = client.get("/api/quotes/600519/money_flow/today")
+        assert resp.status_code == 503
+
+    def test_real_zero_flow_record_is_preserved(
+        self, client: TestClient, mock_adapter: MagicMock
+    ) -> None:
+        from tests.test_web.conftest import make_flow
+
+        mock_adapter.get_today_money_flow.return_value = [make_flow(main_net="0")]
+        resp = client.get("/api/quotes/600519/money_flow/today")
         assert resp.status_code == 200
-        data = resp.json()
-        assert data["items"] == []
-        # 空数据累计全 0
-        assert data["cumulative"] == {
-            "main_net": "0",
-            "super_net": "0",
-            "big_net": "0",
-            "medium_net": "0",
-            "small_net": "0",
-        }
+        assert resp.json()["items"][0]["main_net"] == "0"
+        assert resp.json()["cumulative"]["main_net"] == "0"
+
+
+class TestGetMoneyFlowHistory:
+    """GET /api/quotes/{code}/money_flow/history — 历史资金流。"""
+
+    def test_empty_list_is_unavailable(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        mock_adapter.get_history_money_flow.return_value = []
+        resp = client.get("/api/quotes/600519/money_flow/history")
+        assert resp.status_code == 503
+
+    def test_exception_is_unavailable(self, client: TestClient, mock_adapter: MagicMock) -> None:
+        mock_adapter.get_history_money_flow.side_effect = ConnectionError("offline")
+        resp = client.get("/api/quotes/600519/money_flow/history")
+        assert resp.status_code == 503
+
+    def test_non_empty_zero_flow_record_is_valid(
+        self, client: TestClient, mock_adapter: MagicMock
+    ) -> None:
+        from tests.test_web.conftest import make_flow
+
+        mock_adapter.get_history_money_flow.return_value = [make_flow(main_net="0")]
+        resp = client.get("/api/quotes/600519/money_flow/history")
+        assert resp.status_code == 200
+        assert resp.json()["items"][0]["main_net"] == "0"
+        assert resp.json()["cumulative"]["main_net"] == "0"

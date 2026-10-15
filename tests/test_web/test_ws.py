@@ -317,6 +317,41 @@ class TestAgentWebSocket:
                 "rounds": 1,
             }
 
+    def test_denied_tool_result_frames_denied_status(
+        self, client: TestClient, monkeypatch: object
+    ) -> None:
+        """写操作被用户拒绝时 tool_call_finished 的 status 是 denied（≠ fail）。"""
+        from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE
+        from mommy_chaogu.web import deps
+
+        agent = MagicMock()
+
+        def fake_chat(message, *args, **kwargs):
+            cb = kwargs.get("callbacks")
+            if cb is not None and cb.on_tool_result is not None:
+                cb.on_tool_result("strategy_save", False, 0, DENIAL_RESULT_MESSAGE)
+            return SimpleNamespace(text="已取消保存", tool_calls=[], rounds=1)
+
+        agent.chat.side_effect = fake_chat
+        memory = MagicMock()
+        memory.for_session.return_value = MagicMock()
+        monkeypatch.setattr(deps, "get_agent_service", lambda: agent)  # type: ignore[attr-defined]
+        monkeypatch.setattr(deps, "get_agent_memory", lambda: memory)  # type: ignore[attr-defined]
+        monkeypatch.setattr(deps, "get_watchlist_store", _fake_watchlist_store)  # type: ignore[attr-defined]
+
+        with client.websocket_connect("/ws/agent") as ws:
+            ws.send_json({"message": "存个策略卡"})
+            assert ws.receive_json() == {"type": "thinking"}
+            assert ws.receive_json() == {
+                "type": "tool_call_finished",
+                "tool": "strategy_save",
+                "status": "denied",
+                "elapsed_ms": 0,
+                "result": DENIAL_RESULT_MESSAGE,
+            }
+            assert ws.receive_json() == {"type": "chunk", "text": "已取消保存"}
+            assert ws.receive_json() == {"type": "done", "tools_used": [], "rounds": 1}
+
     def test_fallback_sends_full_text_when_streaming_unsupported(
         self, client: TestClient, monkeypatch: object
     ) -> None:

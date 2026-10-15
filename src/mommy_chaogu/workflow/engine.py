@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -74,6 +75,7 @@ class StepResult:
 
     Attributes:
         optional: 该步是否为可选步骤（失败只降级，不影响整体成功判定）。
+        elapsed_ms: 本步耗时（毫秒，含工具调用与结果解析；展示用）。
     """
 
     display_name: str
@@ -82,6 +84,7 @@ class StepResult:
     data: Any = None
     error: str | None = None
     optional: bool = False
+    elapsed_ms: int = 0
 
 
 @dataclass
@@ -228,9 +231,11 @@ class WorkflowExecutor:
                 on_step_start(step.display_name)
 
             # 执行工具调用
+            step_started = time.perf_counter()
             try:
                 raw = self._tools.call(step.tool_name, args)
                 parsed = _safe_parse_json(raw)
+                elapsed_ms = int((time.perf_counter() - step_started) * 1000)
                 # registry.call 把工具失败转成 {"error": ...} JSON 字符串返回，
                 # 并不抛出——必须检查 payload 的 error 键，否则失败步骤一律
                 # 记为 success，optional/break 逻辑成为死代码（T2）。
@@ -242,6 +247,7 @@ class WorkflowExecutor:
                         success=False,
                         error=str(parsed["error"]),
                         optional=step.optional,
+                        elapsed_ms=elapsed_ms,
                     )
                 else:
                     sr = StepResult(
@@ -250,11 +256,13 @@ class WorkflowExecutor:
                         success=True,
                         data=parsed,
                         optional=step.optional,
+                        elapsed_ms=elapsed_ms,
                     )
                     step_results.append(
                         {"step": step.display_name, "tool": step.tool_name, "result": parsed}
                     )
             except Exception as e:
+                elapsed_ms = int((time.perf_counter() - step_started) * 1000)
                 _log.warning("工作流步骤 %s 失败: %s", step.display_name, e)
                 sr = StepResult(
                     display_name=step.display_name,
@@ -262,6 +270,7 @@ class WorkflowExecutor:
                     success=False,
                     error=str(e),
                     optional=step.optional,
+                    elapsed_ms=elapsed_ms,
                 )
 
             result.steps.append(sr)

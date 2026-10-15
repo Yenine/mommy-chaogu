@@ -36,6 +36,7 @@ from mommy_chaogu.cli_repl import render_logo as _render_logo  # noqa: F401  测
 from mommy_chaogu.cli_repl import print_workflow_result
 from mommy_chaogu.errors import friendly_error
 from mommy_chaogu.setup import main_setup
+from mommy_chaogu.version import __version__
 
 # ============================================================
 # mommy — 面向用户的自然语言入口
@@ -434,6 +435,14 @@ def main_mommy() -> None:
         "--setup",
         action="store_true",
         help="运行首次配置引导（Provider + 模型 + API key + 微信）",
+    )
+    # 发版检查与 release smoke 依赖裸版本号输出（tag 去掉前导 v 后精确相等），
+    # 不带 prog 前缀；action="version" 在解析期直接 exit 0，不进 REPL/向导。
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=__version__,
+        help="显示版本号并退出",
     )
     # 解析已知参数；无法识别的参数告警而非静默吞掉（拼错参数应当被看见）
     args, unknown = parser.parse_known_args()

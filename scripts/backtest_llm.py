@@ -143,11 +143,14 @@ def load_klines(conn: sqlite3.Connection, code: str) -> list[dict[str, Any]]:
 
 
 def load_flows(conn: sqlite3.Connection, code: str) -> list[dict[str, Any]]:
+    # flows 表的 ratio 列 = efinance「主力净流入占比」，即主力净流入占**成交额**的 %
+    # （5.2 = 5.2%）；不是 flows 域/回测引擎的 ratio（主力净流入÷流通市值，bp 口径）。
+    # 此处按真实口径命名 main_net_pct，下游展示 / prompt 阈值同用 % 单位。
     rows = conn.execute(
         "SELECT date, main_net, ratio FROM flows WHERE code=? ORDER BY date",
         (code,),
     ).fetchall()
-    return [{"date": r[0], "main_net": r[1], "ratio": r[2]} for r in rows]
+    return [{"date": r[0], "main_net": r[1], "main_net_pct": r[2]} for r in rows]
 
 
 # ============================================================
@@ -175,7 +178,8 @@ _PREDICT_USER_TMPL = """\
 }}
 
 判断要点：
-- 主力资金流 ratio（bp）方向与连续性：>5bp 偏多，<-5bp 偏空，10bp 以上是强信号
+- 主力资金流占比（main_net_pct%，主力净流入占当日成交额）方向与连续性：
+  >5% 偏多，<-5% 偏空，10% 以上是强信号
 - 量价配合：放量上涨 / 缩量上涨 / 放量下跌
 - 近期趋势：连续阳线还是阴线，有无破位
 - 没有明确信号时给 neutral，不要硬猜
@@ -199,7 +203,10 @@ def build_context_from_rows(
     if len(slice_klines) < 5:
         return None
 
-    lines = ["date       close   chg%    vol        main_net       ratio_bp"]
+    # main_net_pct：主力净流入占成交额 %（efinance 主力净流入占比）。
+    # 注意口径差异：flows 域/回测的 ratio = 主力净流入÷流通市值（bp 口径），
+    # 两者的分母与量级都不同，此处不得标回 ratio_bp。
+    lines = ["date       close   chg%    vol        main_net       main_net_pct%"]
     for i, k in enumerate(slice_klines):
         d = k["date"]
         close = k["close"]
@@ -207,9 +214,9 @@ def build_context_from_rows(
         chg = (close - prev) / prev * 100 if prev else 0.0
         flow = flows.get(d)
         main_net = flow["main_net"] if flow else 0.0
-        ratio_bp = flow["ratio"] if flow else 0.0
+        main_net_pct = flow["main_net_pct"] if flow else 0.0
         lines.append(
-            f"{d} {close:7.2f} {chg:+6.2f}  {k['volume']:10.0f} {main_net:14.0f} {ratio_bp:+8.2f}"
+            f"{d} {close:7.2f} {chg:+6.2f}  {k['volume']:10.0f} {main_net:14.0f} {main_net_pct:+8.2f}"
         )
     return "\n".join(lines)
 

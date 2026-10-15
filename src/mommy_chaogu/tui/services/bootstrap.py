@@ -258,12 +258,14 @@ class Services:
         except Exception as e:
             _log.warning("NLRouter 初始化失败: %s", e)
 
-        # FlowService（/flows slash 命令用）
+        # FlowService（/flows slash 命令用）——注入既有 adapter（同进程
+        # 单实例，与 DataService / agent 共享缓存与节流状态），不再
+        # from_default 另起一条 adapter 链 + CacheStore
         flows_service = None
         try:
             from mommy_chaogu.flows.service import FlowService
 
-            flows_service = FlowService.from_default(MARKET_DB)
+            flows_service = FlowService(adapter, adapter.store)
         except Exception as e:
             _log.warning("FlowService 初始化失败: %s", e)
 

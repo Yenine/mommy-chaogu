@@ -9,7 +9,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ import pytest
 from mommy_chaogu.cache import CacheStore
 from mommy_chaogu.flows.pool import CustomPool
 from mommy_chaogu.flows.service import FlowService, FlowSummary, PullResult
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import (
     MarketType,
     Money,
@@ -35,12 +37,18 @@ class FakeAdapter:
 
     def __init__(self) -> None:
         self._last_fetch_attempt: dict[str, datetime] = {}
+        self.reset_keys: list[str] = []
         self._today_flows: dict[str, list[MoneyFlow]] = {}
         self._history_flows: dict[str, list[MoneyFlow]] = {}
         self._quotes: dict[str, Quote] = {}
         self._today_calls: list[str] = []
         self._history_calls: list[str] = []
         self._raise_on_today: set[str] = set()
+
+    def reset_fetch_throttle(self, key: str) -> None:
+        """与 CachedMarketDataAdapter 同契约：重置节流（记录调用供断言）。"""
+        self.reset_keys.append(key)
+        self._last_fetch_attempt.pop(key, None)
 
     def get_today_money_flow(self, code: str) -> list[MoneyFlow]:
         self._today_calls.append(code)
@@ -113,7 +121,7 @@ def _flow_dict(
     main: float = 0.0,
     super_large: float = 0.0,
     large: float = 0.0,
-    ts: str = "2026-07-06T10:00:00",
+    ts: str = "2026-07-06T10:00:00+08:00",
     ratio: str | None = None,
 ) -> dict[str, Any]:
     d: dict[str, Any] = {
@@ -303,8 +311,8 @@ def test_pull_today_force_resets_throttle(service: FlowService, adapter: FakeAda
     adapter._today_flows = {"600519": [_money_flow("600519")]}
     pool = CustomPool(["600519"])
     service.pull_today(pool, force=True)
-    # force 模式会重置 _last_fetch_attempt
-    assert "today_flow:600519" in adapter._last_fetch_attempt
+    # force 走公开契约 reset_fetch_throttle（不再直改 _last_fetch_attempt）
+    assert "today_flow:600519" in adapter.reset_keys
 
 
 def test_pull_today_empty_pool(service: FlowService) -> None:
@@ -402,12 +410,66 @@ def test_top_today_skips_uncached(service: FlowService, store: CacheStore) -> No
     assert top[0].code == "600519"
 
 
+# ========== top_today / show 数据日期契约（P3） ==========
+
+
+def _today_iso() -> str:
+    return beijing_trade_date(datetime.now(UTC))
+
+
+def test_top_today_excludes_cross_trade_date_cache(service: FlowService, store: CacheStore) -> None:
+    """跨交易日缓存不当当日：非当日（含未知日期）条目不进当日排行。"""
+    today = _today_iso()
+    prev = beijing_trade_date(datetime.now(UTC) - timedelta(days=3))
+    assert prev != today
+    store.set_today_money_flow("600519", [_flow_dict("600519", main=80_000_000)], trade_date=today)
+    store.set_today_money_flow("000001", [_flow_dict("000001", main=200_000_000)], trade_date=prev)
+    pool = CustomPool(["600519", "000001"])
+    top = service.top_today(pool, n=10)
+    assert [s.code for s in top] == ["600519"]
+    assert top[0].data_date == today
+
+
+def test_top_today_excludes_unknown_trade_date(service: FlowService, store: CacheStore) -> None:
+    """旧库迁移前行（trade_date 为 NULL）：未知日期 → 不当当日。"""
+    from sqlalchemy import text
+
+    flows_json = json.dumps([_flow_dict("600519", main=80_000_000)], ensure_ascii=False)
+    with store.session() as s:
+        s.execute(
+            text(
+                "INSERT INTO today_money_flow_cache (code, flows_json, fetched_at) "
+                "VALUES (:c, :j, :f)"
+            ),
+            {"c": "600519", "j": flows_json, "f": datetime.now(UTC)},
+        )
+    top = service.top_today(CustomPool(["600519"]), n=10)
+    assert top == []
+
+
+def test_show_outputs_today_data_date(service: FlowService, store: CacheStore) -> None:
+    """show 如实返回缓存 + 数据日期字段；是否当日由消费方按字段判断。"""
+    prev = beijing_trade_date(datetime.now(UTC) - timedelta(days=3))
+    store.set_today_money_flow("600519", [_flow_dict("600519", main=50_000_000)], trade_date=prev)
+    info = service.show("600519")
+    assert info["today"] is not None
+    assert info["today_data_date"] == prev
+    assert info["today_is_current"] is False
+
+
+def test_show_current_cache_marked(service: FlowService, store: CacheStore) -> None:
+    _seed_today(store, "600519", 50_000_000)  # 默认 trade_date = 北京当日
+    info = service.show("600519")
+    assert info["today_data_date"] == _today_iso()
+    assert info["today_is_current"] is True
+
+
 # ========== top_history ==========
 
 
 def _seed_history(store: CacheStore, code: str, trade_date: str, main: float) -> None:
     store.set_money_flow_history(
-        code, trade_date, [_flow_dict(code=code, main=main, ts=f"{trade_date}T15:00:00")]
+        code, trade_date, [_flow_dict(code=code, main=main, ts=f"{trade_date}T15:00:00+08:00")]
     )
 
 

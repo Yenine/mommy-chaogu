@@ -1,0 +1,233 @@
+# 发布后 smoke：release published（或手动指定 tag）时，检出该 tag 并用 tag 内的
+# install.sh 在隔离环境安装真实 release，验证 mommy --version 自报版本、doctor 的
+# skill_integrity，以及 releases/latest API 收敛到新 tag。
+#
+# 边界（诚实声明）：
+# - 验证的是 tag 内的 install.sh；main 与 tag 之间 install.sh 的漂移窗口不在本
+#   工作流覆盖内，需人工关注。
+# - 只跑 Linux（ubuntu-latest）；install.sh 本身仅支持 macOS/Linux，Windows 路径不支持。
+# - 不含升级 / 回滚路径验证，只测全新安装。
+# - 触发本工作流的 tag 应是当前最新 release：预发布 tag（如 v1.7.0-rc1）永远不会成为
+#   releases/latest，对旧 tag 手动 dispatch 也会让 latest 收敛断言必然失败并开 issue
+#   （设计内断言行为，不是误报）。
+# - doctor 只断言 skill_integrity；runner 上没有宿主 Agent CLI，doctor 的
+#   managed_connection / host_configuration / MCP 探针结论在该环境不具诊断意义。
+
+name: Release smoke
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要验证的 release tag（如 v1.6.0）"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  release-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -eu
+          if [ "$EVENT_NAME" = "release" ]; then
+            TAG="$RELEASE_TAG"
+          else
+            TAG="$INPUT_TAG"
+          fi
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::无效或缺失的 release tag：'${TAG:-}'（期望 vX.Y.Z）"; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # 隔离安装环境：真实安装不污染 runner 的 HOME，也不与预装 uv 工具目录混用。
+      - name: Isolate HOME and uv tool directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/mommy-home"
+          {
+            echo "HOME=$RUNNER_TEMP/mommy-home"
+            echo "UV_TOOL_DIR=$RUNNER_TEMP/mommy-tools"
+            echo "UV_TOOL_BIN_DIR=$RUNNER_TEMP/mommy-bin"
+          } >> "$GITHUB_ENV"
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install release through the tag's install.sh
+        id: install
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          # 固定安装源为被验证 tag 的 tarball（与 install.sh 默认解析 latest 得到的
+          # URL 同一形态）：release 刚发布时 releases/latest 可能仍指向旧 tag，
+          # 收敛性由后续 latest 步骤单独断言，安装本身不能赌它。
+          export MOMMY_INSTALL_SOURCE="mommy-chaogu @ https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${RELEASE_TAG}.tar.gz"
+          sh ./install.sh
+
+      - name: mommy --version equals tag version
+        id: version
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          expected="${RELEASE_TAG#v}"
+          mommy_bin="$UV_TOOL_BIN_DIR/mommy"
+          actual="$("$mommy_bin" --version)"
+          echo "mommy --version → '$actual'（期望 '$expected'）"
+          [ "$actual" = "$expected" ]
+
+      - name: Bundled skills intact (doctor skill_integrity)
+        id: doctor
+        continue-on-error: true
+        run: |
+          set -u
+          mommy_bin="$UV_TOOL_BIN_DIR/mommy"
+          # runner 上没有受支持宿主的 CLI（claude/kimi/...），connect 会在注册 MCP
+          # 配置一步失败——但捆绑 Skills 在注册之前已全部落盘（connect.py 中
+          # install_skill 先于 register_mcp），doctor 的 skill_integrity 因此可判；
+          # 若未来 runner 镜像自带宿主 CLI，connect 全量成功同样满足下面的断言。
+          "$mommy_bin" agent connect --host claude --profile market-only --json \
+            > connect-output.json 2> connect-output.err \
+            || echo "connect 未全量完成（runner 无 claude CLI 时属预期）"
+          cat connect-output.json || true
+          cat connect-output.err >&2 || true
+          "$mommy_bin" agent doctor --host claude --json \
+            > doctor-output.json 2> doctor-output.err \
+            || echo "doctor 整体未通过（本步只断言 skill_integrity）"
+          cat doctor-output.json || true
+          cat doctor-output.err >&2 || true
+          python3 - <<'PY'
+          import json
+          import sys
+
+          payload = json.load(open("doctor-output.json", encoding="utf-8"))
+          checks = {item["name"]: item for item in payload.get("checks", [])}
+          integrity = checks.get("skill_integrity")
+          if integrity is None:
+              print("::error::doctor 输出缺少 skill_integrity 检查项")
+              sys.exit(1)
+          if integrity.get("status") != "ok":
+              print(
+                  "::error::skill_integrity="
+                  f"{integrity.get('status')}: {integrity.get('message', '')}"
+              )
+              sys.exit(1)
+          print(f"skill_integrity ok: {integrity.get('message', '')}")
+          PY
+
+      - name: releases/latest converges to the tag
+        id: latest
+        continue-on-error: true
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest"
+          for attempt in 1 2 3; do
+            if latest="$(curl -fsSL --max-time 20 \
+                -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                "$api" | jq -r '.tag_name')"; then
+              if [ "$latest" = "$RELEASE_TAG" ]; then
+                echo "releases/latest 已收敛到 ${RELEASE_TAG}（第 ${attempt} 次尝试）"
+                exit 0
+              fi
+              echo "第 ${attempt} 次尝试：releases/latest=${latest}，期望 ${RELEASE_TAG}"
+            else
+              echo "第 ${attempt} 次尝试：releases/latest 请求失败"
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              sleep 60
+            fi
+          done
+          echo "::error::重试 3 次后 releases/latest 仍未指向 ${RELEASE_TAG}"
+          exit 1
+
+      # 复用 network-smoke.yml 的追踪模式：失败开 issue / 再次失败评论 / 恢复后评论并关闭。
+      - name: Track repeated release-smoke failures
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@v7
+        env:
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          VERSION_RESULT: ${{ steps.version.outcome }}
+          DOCTOR_RESULT: ${{ steps.doctor.outcome }}
+          LATEST_RESULT: ${{ steps.latest.outcome }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        with:
+          script: |
+            const results = {
+              install: process.env.INSTALL_RESULT,
+              version: process.env.VERSION_RESULT,
+              doctor: process.env.DOCTOR_RESULT,
+              latest_api: process.env.LATEST_RESULT,
+            };
+            const tag = process.env.RELEASE_TAG || "unknown";
+            const failed = Object.values(results).some(value => value !== "success");
+            const detail = `tag=${tag} · ` + Object.entries(results)
+              .map(([name, value]) => `${name}=${value || "skipped"}`).join(" ");
+            const title = "Release smoke is failing";
+            const {owner, repo} = context.repo;
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100
+            });
+            const existing = issues.find(issue => issue.title === title);
+            const run = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            if (failed) {
+              core.warning(`Release smoke failed (${detail}): ${run}`);
+              if (existing) {
+                await github.rest.issues.createComment({owner, repo, issue_number: existing.number,
+                  body: `Release smoke failed again (${detail}): ${run}`});
+              } else {
+                await github.rest.issues.create({owner, repo, title,
+                  body: `First observed failure (${detail}): ${run}`});
+              }
+            } else if (existing) {
+              await github.rest.issues.createComment({owner, repo, issue_number: existing.number,
+                body: `Release smoke recovered (${detail}): ${run}`});
+              await github.rest.issues.update({owner, repo, issue_number: existing.number,
+                state: "closed"});
+            }
+
+      # 断言步骤都用 continue-on-error 以完整收集诊断，最终在这里把失败落到
+      # job 结论上（network-smoke 靠 issue 追踪、job 保持绿色；发布 smoke 需要
+      # 红/绿结论作为发版验证的一部分）。
+      - name: Enforce release-smoke result
+        if: ${{ !cancelled() }}
+        env:
+          INSTALL_RESULT: ${{ steps.install.outcome }}
+          VERSION_RESULT: ${{ steps.version.outcome }}
+          DOCTOR_RESULT: ${{ steps.doctor.outcome }}
+          LATEST_RESULT: ${{ steps.latest.outcome }}
+        run: |
+          failed=0
+          for pair in "install=$INSTALL_RESULT" "version=$VERSION_RESULT" "doctor=$DOCTOR_RESULT" "latest=$LATEST_RESULT"; do
+            name="${pair%%=*}"
+            outcome="${pair#*=}"
+            if [ "$outcome" != "success" ]; then
+              echo "::error::release smoke 步骤 ${name} 未通过（outcome=${outcome:-skipped}）"
+              failed=1
+            fi
+          done
+          exit "$failed"

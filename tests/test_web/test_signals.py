@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -26,7 +29,23 @@ class TestRecentSignals:
 
 
 class TestHistorySignals:
-    """GET /api/signals/history — 从 signals.log 解析。"""
+    """GET /api/signals/history — 日志回退路径解析。
+
+    本类只 mock alerter 日志；主路径的 signal_events 结构化库必须一并
+    隔离为空库——否则本机真实库非空时（例如跑过 mommy-web 的监控轮询）
+    主路径直接返回真实行，回退路径永远走不到，测试随环境漂移。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _empty_signal_store(self, client: TestClient, tmp_path: Path) -> Iterator[None]:
+        from mommy_chaogu.signals import SignalStore
+        from mommy_chaogu.web.deps import get_signal_store
+
+        store = SignalStore(tmp_path / "signals_empty.db")
+        client.app.dependency_overrides[get_signal_store] = lambda: store  # type: ignore[attr-defined]
+        yield
+        store.close()
+        client.app.dependency_overrides.pop(get_signal_store, None)  # type: ignore[attr-defined]
 
     def test_empty_when_no_log(self, client: TestClient) -> None:
         from mommy_chaogu.web.deps import get_alerter

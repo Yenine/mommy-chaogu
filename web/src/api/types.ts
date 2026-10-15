@@ -1,4 +1,4 @@
-// API 类型定义（对应后端 Pydantic schemas）
+// API 类型定义（对应后端 Pydantic schemas；契约对照见 tests/test_web/test_frontend_contract.py）
 
 export interface Quote {
   code: string
@@ -33,42 +33,6 @@ export interface Snapshot {
   n_flat: number
 }
 
-export interface Bar {
-  timestamp: string
-  open: string
-  high: string
-  low: string
-  close: string
-  volume: number
-  turnover: string
-}
-
-export interface OrderBookLevel {
-  price: string
-  volume: number
-}
-
-export interface OrderBook {
-  code: string
-  timestamp: string
-  bids: OrderBookLevel[]
-  asks: OrderBookLevel[]
-}
-
-export interface WatchlistStock {
-  code: string
-  name: string
-  group: string
-  note: string
-  added_at: string
-}
-
-export interface WatchlistGroup {
-  name: string
-  description: string
-  n_stocks: number
-}
-
 export interface Signal {
   timestamp: string
   code: string
@@ -79,22 +43,6 @@ export interface Signal {
   detail: string
   trigger_value: string | null
   threshold_value: string | null
-}
-
-export interface CacheStats {
-  hits: number
-  fetches: number
-  fetch_ok: number
-  fetch_fail: number
-  miss: number
-  hit_rate: number
-  freshness: Array<{
-    code: string
-    name: string
-    fetched_at: string
-    quote_ts: string
-    age_seconds: number
-  }>
 }
 
 export interface Health {
@@ -108,26 +56,6 @@ export interface StockSearchResult {
   code: string
   name: string
   source: 'watchlist' | 'semicon' | 'cache' | 'remote'
-}
-
-export interface StockHoldingContext {
-  position_count: number
-  shares: number
-  avg_cost: string
-  total_cost: string
-}
-
-export interface StockBasketContext {
-  id: string
-  name: string
-  kind: 'theme' | 'custom'
-  reason: string
-}
-
-export interface StockDecisionContext {
-  code: string
-  holding: StockHoldingContext | null
-  baskets: StockBasketContext[]
 }
 
 export interface AgentHistoryMessage {
@@ -164,28 +92,6 @@ export interface PortfolioSummary {
   n_positions: number
 }
 
-export interface Position {
-  id: number
-  code: string
-  name: string | null
-  buy_price: string
-  shares: number
-  buy_date: string | null
-  note: string
-  created_at: string
-  updated_at: string
-}
-
-export interface Adjustment {
-  id: number
-  position_id: number
-  action: 'buy' | 'sell' | 'dividend'
-  price: string
-  shares: number
-  timestamp: string
-  note: string
-}
-
 // ---------- Market Ranking ----------
 
 export interface IndexQuote {
@@ -194,24 +100,6 @@ export interface IndexQuote {
   price: string
   change_pct: string
   prev_close: string
-}
-
-export interface SectorQuote {
-  code: string
-  name: string
-  change_pct: string
-  price: string
-}
-
-export interface RankingQuote {
-  code: string
-  name: string
-  price: string
-  change_pct: string
-  change: string
-  volume: number
-  turnover: string
-  market: string
 }
 
 // ---------- Money Flow ----------
@@ -274,15 +162,4 @@ export interface Prediction {
   data_coverage_at_verify: string | null
   source_event_id: number | null
   insight_event_id: number | null
-}
-
-/** 预测统计（命中率分布）。hit_rate 为 0..1 的小数。 */
-export interface PredictionStats {
-  total: number
-  pending: number
-  hit: number
-  missed: number
-  expired: number
-  unverifiable: number
-  hit_rate: number
 }

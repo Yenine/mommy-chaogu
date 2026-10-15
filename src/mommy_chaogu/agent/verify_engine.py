@@ -34,7 +34,7 @@ class VerifyResult:
     change_pct: float | None = None
     score: float = 0.0
     reason: str = ""
-    quote_source: str = ""  # "adapter" / "stale_cache"（空串 = 未取到报价）
+    quote_source: str = ""  # adapter(裸链)/network/cache/stale_cache；空串=未取到报价
     quote_age_seconds: float | None = None  # 缓存报价的数据年龄（adapter 报价未知 → None）
 
 
@@ -188,7 +188,15 @@ def verify_one(
     try:
         quote = adapter.get_quote(code)
         if quote is not None:
-            quote_source = "adapter"
+            # 诚实标注：缓存装饰器会给出本次读取的具体来源（network /
+            # cache / stale_cache），如实透传，cache/stale_cache 不再谎标
+            # "adapter"；裸链没有 last_source 时回退 "adapter"。非 str 的
+            # 异常实现（如测试 MagicMock 自动属性）同样回退，不把 Mock
+            # 对象写进验证记录。
+            last_source = getattr(adapter, "last_source", None)
+            quote_source = (
+                last_source if isinstance(last_source, str) and last_source else "adapter"
+            )
     except Exception as e:
         _log.debug("verify: adapter.get_quote(%s) failed: %s", code, e)
 
@@ -339,7 +347,8 @@ def verify_pending(
         # hit / missed / unverifiable — 终态，回填验证结果
         # （unverifiable 不计入 hit/missed，hit_rate 分母不受影响）
         # data_coverage_at_verify 保留 "quote" 布尔键（向后兼容），并补充
-        # 报价新鲜度：source（adapter / stale_cache）与 quote_age_seconds
+        # 报价新鲜度：source（adapter / network / cache / stale_cache，
+        # 取自 adapter.last_source 透传）与 quote_age_seconds
         # （仅缓存来源可知年龄，adapter 实时报价记 null）。
         data_coverage_verify: dict[str, Any] = {
             "quote": result.price is not None,

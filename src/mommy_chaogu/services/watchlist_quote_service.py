@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from typing import NotRequired, TypedDict
 
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.market_data.types import Money, MoneyFlow
 
@@ -59,6 +60,9 @@ class WatchlistQuoteService:
     def fetch(self, codes: list[str]) -> list[WatchlistQuoteRow]:
         """拉取一批 code 的报价 + 当日主力净流入。
 
+        ``last_source_label`` 取 get_quotes 返回瞬间的来源快照（资金流
+        线程池随后对共享来源字段的改写不污染标签，也不带数据日期后缀）。
+
         Args:
             codes: 股票代码列表（调用方决定来源：自选股 / 主题成分 / 任意集合）
 
@@ -72,8 +76,14 @@ class WatchlistQuoteService:
 
         # ---- 批量报价（一次 HTTP 拉所有 code）----
         quote_error = False
+        quote_source = ""
         try:
             quotes = adapter.get_quotes(codes)
+            # 来源标签快照点：get_quotes 一返回就读共享来源字段的拷贝，
+            # 之后资金流线程池对它的改写不影响本轮报价标签。报价路径本身
+            # 从不产生数据日期——快照里残留的 trade_date 只可能来自上一轮
+            # 资金流，渲染时一律不拼「数据日期」后缀。
+            quote_source = self._snapshot_source(adapter)
         except Exception as e:
             _log.debug("批量拉取报价失败: %s", e)
             quotes = []
@@ -84,7 +94,7 @@ class WatchlistQuoteService:
         # ---- 资金流并发拉（无批量 API，5 分钟节流缓存）----
         flows_by_code: dict[str, Money | None] = {}
         with ThreadPoolExecutor(max_workers=FLOW_MAX_WORKERS) as pool:
-            flow_results = list(pool.map(self._fetch_flow_safe, codes))
+            flow_results = list(pool.map(self.fetch_flow_safe, codes))
         for code, flow_val in zip(codes, flow_results, strict=True):
             if flow_val is not None:
                 flows_by_code[code] = flow_val
@@ -117,17 +127,37 @@ class WatchlistQuoteService:
                 )
             )
 
-        self.last_source_label = (
-            str(adapter.format_source_label()) if hasattr(adapter, "format_source_label") else ""
-        )
+        # 标签从 get_quotes 后的快照渲染，不读实例当前状态（资金流线程池
+        # 已经改写它）；非缓存装饰器 adapter（duck-typed / 测试 fake）维持
+        # 实例读取。
+        label_from = getattr(adapter, "format_source_label_from", None)
+        if callable(label_from):
+            self.last_source_label = str(label_from(quote_source, ""))
+        elif hasattr(adapter, "format_source_label"):
+            self.last_source_label = str(adapter.format_source_label())
+        else:
+            self.last_source_label = ""
         return rows
 
-    def _fetch_flow_safe(self, code: str) -> Money | None:
-        """线程池内安全拉当日资金流，失败返回 None。"""
+    @staticmethod
+    def _snapshot_source(adapter: MarketDataAdapter) -> str:
+        """读 adapter 当前来源快照；无该契约的 adapter 返回空串。"""
+        snap = getattr(adapter, "source_snapshot", None)
+        if callable(snap):
+            try:
+                return str(snap()[0])
+            except Exception:
+                pass
+        return ""
+
+    def fetch_flow_safe(self, code: str) -> Money | None:
+        """安全拉当日主力资金流，失败返回 None（线程池内逐只调用）。"""
         try:
             flows: list[MoneyFlow] = self._adapter.get_today_money_flow(code)  # type: ignore[union-attr]
-            if flows:
-                return getattr(flows[-1], "main_net", None)
+            # 每日累计取末条契约（flows/cumulative）；getattr 保持 duck-typed
+            latest = latest_money_flow(flows)
+            if latest is not None:
+                return getattr(latest, "main_net", None)
         except Exception as e:
             _log.debug("拉资金流 %s 失败: %s", code, e)
         return None

@@ -26,11 +26,12 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.command import DiscoveryHit, Hit, Hits, Provider
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Static
 
-from mommy_chaogu.agent.service import DENIAL_RESULT_MESSAGE, ChatCallbacks
+from mommy_chaogu.agent.service import ChatCallbacks, is_denial_result
 from mommy_chaogu.db_paths import DEFAULT_DATA_DIR
 from mommy_chaogu.tui.messages import StepStatus
 from mommy_chaogu.tui.screens.help import HelpScreen
@@ -849,7 +850,7 @@ class MommyTuiApp(App[None]):
         if side is not None:
             if ok:
                 status, digest = "done", format_digest(name, result)
-            elif result == DENIAL_RESULT_MESSAGE:
+            elif is_denial_result(result):
                 status, digest = "denied", "已拒绝（用户）"
             else:
                 status = "failed"
@@ -948,6 +949,26 @@ class MommyTuiApp(App[None]):
         if chat is None:
             return
 
+        # 退出期竞态（_chat_or_defer 的同族防御）：用户退出 / 测试收尾拆除
+        # DOM 的同时，agent 回合最后一个 call_from_thread 才到——ChatView
+        # 还能 query 到但子树（#chat-log 等）已拆，回合收尾无处渲染。安静
+        # 放弃而不是炸 traceback：回合状态随 app 一起销毁，重试也追不上
+        # 拆除进度（chat.py 对 NoMatches 的防御同款）。
+        try:
+            self._render_agent_turn(chat, turn_id, user_text, reply, interrupted)
+        except NoMatches:
+            _log.debug("agent turn #%s finished during app teardown; drop rendering", turn_id)
+            return
+
+    def _render_agent_turn(
+        self,
+        chat: ChatView,
+        turn_id: int,
+        user_text: str,
+        reply: str,
+        interrupted: bool,
+    ) -> None:
+        """_on_agent_done 的渲染主体（拆出以便退出期竞态统一兜底）。"""
         # 如果流式 widget 存在，收尾它（最终刷新 + 拿到流式文本）
         streamed_text = ""
         if chat._stream_widget is not None:

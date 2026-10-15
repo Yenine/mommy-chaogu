@@ -64,6 +64,9 @@ class ChatResponse(BaseModel):
 
 class RouteRequest(BaseModel):
     message: str
+    # 工作流轮次要落 agent_memory（/resume 的数据源），所以这里和 ChatRequest
+    # 一样收 session_id；省缺走 web-default 保持旧行为
+    session_id: str = Field(default="web-default", pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class RouteResponse(BaseModel):
@@ -71,6 +74,29 @@ class RouteResponse(BaseModel):
     workflow_id: str = ""
     reply: str = ""
     steps: list[dict[str, Any]] = []
+
+
+class AgentInfoOut(BaseModel):
+    """GET /api/agent/info — 顶栏 AI 配置状态（只给名称，绝不含密钥）。"""
+
+    configured: bool
+    provider: str
+    model: str
+
+
+class AgentSessionSummaryOut(BaseModel):
+    """可恢复会话摘要单项（/resume 列表）。"""
+
+    session_id: str
+    messages: int
+    last_active: str  # ISO 8601（SessionJournal 行已 isoformat）
+    preview: str
+
+
+class AgentSessionsOut(BaseModel):
+    """GET /api/agent/sessions 响应。"""
+
+    sessions: list[AgentSessionSummaryOut] = Field(default_factory=list)
 
 
 # ---------- REST 端点 ----------
@@ -116,6 +142,17 @@ def _get_router() -> Any:
     return runtime.router
 
 
+def _persist_workflow_turn(memory: Any, session_id: str, message: str, reply: str) -> None:
+    """工作流轮次落 agent_memory（user + assistant 两行，同会话）。
+
+    /resume 与刷新恢复都从 agent_memory 派生；AI 对话经 AgentService.chat
+    内部写库，而工作流路径没有 agent——不在这里落库，未配置 AI Key 的
+    用户（工作流是其仅有的对话入口）永远没有可恢复的会话。
+    """
+    memory.add("user", message, session_id=session_id)
+    memory.add("assistant", reply, session_id=session_id)
+
+
 @router.post("/route", response_model=RouteResponse)
 async def route_message(req: RouteRequest) -> RouteResponse:
     """尝试工作流路由。
@@ -136,14 +173,23 @@ async def route_message(req: RouteRequest) -> RouteResponse:
             "name": s.display_name,
             "tool": s.tool_name,
             "success": s.success,
+            "elapsed_ms": s.elapsed_ms,
         }
         for s in result.steps
     ]
+    reply = result.summary or "工作流执行完成。"
+
+    # 持久化失败不影响本次结果返回（对话显示正常，只是这轮不进 /resume）
+    try:
+        memory = get_agent_memory()
+        await asyncio.to_thread(_persist_workflow_turn, memory, req.session_id, req.message, reply)
+    except Exception as exc:
+        _log.warning("工作流轮次持久化失败: %s", exc)
 
     return RouteResponse(
         matched=True,
         workflow_id=route.workflow.id,
-        reply=result.summary,
+        reply=reply,
         steps=steps_data,
     )
 
@@ -209,8 +255,8 @@ async def get_history(
         return {"messages": [], "total": 0}
 
 
-@router.get("/info")
-async def agent_info() -> dict[str, Any]:
+@router.get("/info", response_model=AgentInfoOut)
+async def agent_info() -> AgentInfoOut:
     """当前 AI 配置（顶栏「模型 xxx」）：只给是否配置 / provider / model，绝不含密钥。"""
     from mommy_chaogu.agent.llm import resolve_model, resolve_provider
     from mommy_chaogu.config import load_config
@@ -218,18 +264,18 @@ async def agent_info() -> dict[str, Any]:
     try:
         cfg = load_config().agent
         provider = resolve_provider(cfg.provider)
-        return {
-            "configured": bool(cfg.api_key),
-            "provider": provider,
-            "model": resolve_model(provider, cfg.model),
-        }
+        return AgentInfoOut(
+            configured=bool(cfg.api_key),
+            provider=provider,
+            model=resolve_model(provider, cfg.model),
+        )
     except Exception as exc:
         _log.warning("读取 AI 配置失败: %s", exc)
-        return {"configured": False, "provider": "", "model": ""}
+        return AgentInfoOut(configured=False, provider="", model="")
 
 
-@router.get("/sessions")
-async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+@router.get("/sessions", response_model=AgentSessionsOut)
+async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> AgentSessionsOut:
     """可恢复的历史会话（/resume 列表；与终端版共用 agent_memory，按最近活跃倒序）。"""
     from mommy_chaogu.tui.services.session_journal import SessionJournal
 
@@ -238,18 +284,18 @@ async def list_sessions(limit: int = Query(default=20, ge=1, le=100)) -> dict[st
         rows = await asyncio.to_thread(SessionJournal(memory).sessions, limit)
     except Exception as exc:
         _log.warning("读取历史会话失败: %s", exc)
-        return {"sessions": []}
-    return {
-        "sessions": [
-            {
-                "session_id": r.session_id,
-                "messages": r.n_messages,
-                "last_active": r.last_active.isoformat(),
-                "preview": r.preview,
-            }
+        return AgentSessionsOut()
+    return AgentSessionsOut(
+        sessions=[
+            AgentSessionSummaryOut(
+                session_id=r.session_id,
+                messages=r.n_messages,
+                last_active=r.last_active.isoformat(),
+                preview=r.preview,
+            )
             for r in rows
         ]
-    }
+    )
 
 
 @router.get("/predictions")

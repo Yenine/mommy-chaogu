@@ -117,13 +117,44 @@ class _FakeRouteResult:
 
 
 class _FakeNLRouter:
-    def __init__(self, route_result: Any) -> None:
+    def __init__(self, route_result: Any, exec_result: Any = None) -> None:
         self._route_result = route_result
+        self._exec_result = exec_result
         self.route_calls: list[str] = []
+        self.exec_calls: list[Any] = []
 
     def route(self, message: str) -> Any:
         self.route_calls.append(message)
         return self._route_result
+
+    def execute_route(self, route: Any, user_input: str, **kwargs: Any) -> Any:
+        self.exec_calls.append((route, user_input))
+        return self._exec_result
+
+
+class _FakeWorkflow:
+    def __init__(self, workflow_id: str) -> None:
+        self.id = workflow_id
+
+
+class _FakeMatchedRouteResult:
+    def __init__(self) -> None:
+        self.matched = True
+        self.workflow = _FakeWorkflow("morning_brief")
+
+
+class _FakeAddMemory:
+    """route 端点持久化用的假记忆（只需 add，记录调用）。"""
+
+    def __init__(self, exc: Exception | None = None) -> None:
+        self.add_calls: list[tuple[str, str, str]] = []
+        self._exc = exc
+
+    def add(self, role: str, content: str, session_id: str = "default") -> int:
+        self.add_calls.append((role, content, session_id))
+        if self._exc is not None:
+            raise self._exc
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -406,3 +437,88 @@ class TestRouteEndpoint:
         assert body["reply"] == ""
         assert body["steps"] == []
         assert fake_router.route_calls == ["随便说点什么"]
+
+    def test_matched_persists_turn_and_returns_elapsed_ms(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """命中工作流：结果带 elapsed_ms，且 user/assistant 两行落 agent_memory（/resume 数据源）。"""
+        from mommy_chaogu.workflow.engine import StepResult, WorkflowResult
+
+        exec_result = WorkflowResult(
+            workflow_id="morning_brief",
+            steps=[
+                StepResult(
+                    display_name="正在获取大盘指数",
+                    tool_name="get_market_indexes",
+                    success=True,
+                    elapsed_ms=42,
+                )
+            ],
+            summary="大盘平稳",
+        )
+        fake_router = _FakeNLRouter(_FakeMatchedRouteResult(), exec_result=exec_result)
+        memory = _FakeAddMemory()
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent._get_router", lambda: fake_router)
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent.get_agent_memory", lambda: memory)
+
+        resp = client.post(
+            "/api/agent/route",
+            json={"message": "今天怎么样", "session_id": "web-abc123"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["matched"] is True
+        assert body["workflow_id"] == "morning_brief"
+        assert body["reply"] == "大盘平稳"
+        assert body["steps"][0]["elapsed_ms"] == 42
+        # 工作流轮次按请求的 session_id 落库，未配置 AI Key 也会进 /resume 列表
+        assert memory.add_calls == [
+            ("user", "今天怎么样", "web-abc123"),
+            ("assistant", "大盘平稳", "web-abc123"),
+        ]
+
+    def test_matched_defaults_session_and_empty_summary(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """省缺 session_id 走 web-default；空 summary 回落到「工作流执行完成。」并按该文案落库。"""
+        from mommy_chaogu.workflow.engine import WorkflowResult
+
+        exec_result = WorkflowResult(workflow_id="x", summary="")
+        fake_router = _FakeNLRouter(_FakeMatchedRouteResult(), exec_result=exec_result)
+        memory = _FakeAddMemory()
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent._get_router", lambda: fake_router)
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent.get_agent_memory", lambda: memory)
+
+        resp = client.post("/api/agent/route", json={"message": "今天怎么样"})
+        assert resp.status_code == 200
+        assert resp.json()["reply"] == "工作流执行完成。"
+        assert memory.add_calls[0][2] == "web-default"
+        assert memory.add_calls[1] == ("assistant", "工作流执行完成。", "web-default")
+
+    def test_persistence_failure_does_not_break_response(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """持久化失败只记日志：本次结果照常返回（这轮不进 /resume 而已）。"""
+        from mommy_chaogu.workflow.engine import WorkflowResult
+
+        exec_result = WorkflowResult(workflow_id="x", summary="ok")
+        fake_router = _FakeNLRouter(_FakeMatchedRouteResult(), exec_result=exec_result)
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent._get_router", lambda: fake_router)
+        monkeypatch.setattr(
+            "mommy_chaogu.web.routes.agent.get_agent_memory",
+            lambda: _FakeAddMemory(exc=RuntimeError("db locked")),
+        )
+
+        resp = client.post("/api/agent/route", json={"message": "今天怎么样"})
+        assert resp.status_code == 200
+        assert resp.json()["reply"] == "ok"
+
+    def test_invalid_session_id_rejected(
+        self, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_router = _FakeNLRouter(_FakeMatchedRouteResult())
+        monkeypatch.setattr("mommy_chaogu.web.routes.agent._get_router", lambda: fake_router)
+        resp = client.post(
+            "/api/agent/route", json={"message": "今天怎么样", "session_id": "bad id!"}
+        )
+        assert resp.status_code == 422

@@ -27,7 +27,9 @@ from typing import Any, Literal
 
 from mommy_chaogu.cache import CacheStore
 from mommy_chaogu.cache.adapter import CachedMarketDataAdapter
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.flows.pool import PoolSource
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import Money, MoneyFlow
 
 _log = logging.getLogger(__name__)
@@ -54,6 +56,7 @@ class FlowSummary:
     main_net_ratio: Decimal | None  # 主力净流入占比（%）
     sample_count: int = 1  # 聚合了几条记录
     period: str = ""  # "today" / "history:2026-06-01~2026-06-29"
+    data_date: str = ""  # 缓存数据交易日（today 缓存行的 trade_date）；空 = 未知
 
     def big_money_net(self) -> Decimal:
         """大资金（超大单+大单）净流入。"""
@@ -119,8 +122,8 @@ class FlowService:
 
     def _force_fetch_today(self, code: str) -> list[MoneyFlow]:
         """绕过 today_money_flow 节流，强制拉新。"""
-        # 重置该 code 的拉新节流（私有 API，但 CacheManager 也用这招）
-        self.adapter._last_fetch_attempt[f"today_flow:{code}"] = datetime.min.replace(tzinfo=UTC)
+        # 重置该 code 的拉新节流（公开契约，见 CachedMarketDataAdapter.reset_fetch_throttle）
+        self.adapter.reset_fetch_throttle(f"today_flow:{code}")
         flows = self.adapter.get_today_money_flow(code)
         return flows
 
@@ -128,7 +131,7 @@ class FlowService:
         # 重置该 code 的 history 节流键——CachedMarketDataAdapter.get_history_money_flow
         # 现在会读这个键（`_should_fetch`），因此 force 真正绕过缓存命中分支发起拉新；
         # 此前 history 路径从不读该键，force 是空操作（Q1 资金流收口修复）。
-        self.adapter._last_fetch_attempt[f"history_flow:{code}"] = datetime.min.replace(tzinfo=UTC)
+        self.adapter.reset_fetch_throttle(f"history_flow:{code}")
         flows = self.adapter.get_history_money_flow(code, days=days)
         return flows
 
@@ -189,13 +192,20 @@ class FlowService:
     # ============================================================
 
     def _summarize_today_from_cache(self, code: str) -> FlowSummary | None:
-        raw = self.store.get_today_money_flow(code)
-        if not raw:
-            return None
-        flows = [_money_flow_from_dict(d) for d in raw]
-        return self._aggregate_today(code, flows)
+        """读缓存的当日汇总（附带缓存数据日期）。
 
-    def _aggregate_today(self, code: str, flows: list[MoneyFlow]) -> FlowSummary:
+        不做跨日过滤：summary.data_date 交给消费方校验——top_today 剔除非
+        当日条目；show 原样输出数据日期（P3 数据日期契约）。
+        """
+        entry = self.store.get_today_money_flow_entry(code)
+        if entry is None or not entry.flows:
+            return None
+        flows = [_money_flow_from_dict(d) for d in entry.flows]
+        return self._aggregate_today(code, flows, data_date=entry.trade_date or "")
+
+    def _aggregate_today(
+        self, code: str, flows: list[MoneyFlow], *, data_date: str = ""
+    ) -> FlowSummary:
         """当日资金流：取最新一条（efinance 当日数据是滚动更新，最后一条是当前累计）。"""
         if not flows:
             return FlowSummary(
@@ -209,8 +219,10 @@ class FlowService:
                 main_net_ratio=None,
                 sample_count=0,
                 period="today",
+                data_date=data_date,
             )
-        latest = flows[-1]
+        latest = latest_money_flow(flows)
+        assert latest is not None  # flows 非空，末条必存在（每日累计取末条契约）
         return FlowSummary(
             code=code,
             name=latest.name,
@@ -222,6 +234,7 @@ class FlowService:
             main_net_ratio=latest.main_net_ratio,
             sample_count=len(flows),
             period="today",
+            data_date=data_date,
         )
 
     def _aggregate_history(self, code: str, days: int, flows: list[MoneyFlow]) -> FlowSummary:
@@ -248,7 +261,8 @@ class FlowService:
         main = super_large = large = medium = small = Decimal(0)
         name = ""
         for _d, fs in by_date.items():
-            last = fs[-1]
+            last = latest_money_flow(fs)
+            assert last is not None  # 分组来自非空 flows，末条必存在
             name = name or last.name
             main += last.main_net.amount
             super_large += last.super_large_net.amount
@@ -283,12 +297,17 @@ class FlowService:
             n: 取前 N
             by: main_net（主力净流入） / big_money（超大单+大单）
             direction: in（流入最多） / out（流出最多）
+
+        数据日期契约（P3）：跨交易日缓存（含日期未知的旧行）不当当日，
+        不进入当日排行。
         """
+        today_iso = beijing_trade_date(_utcnow())
         summaries: list[FlowSummary] = []
         for code in pool.codes():
             s = self._summarize_today_from_cache(code)
-            if s is not None:
-                summaries.append(s)
+            if s is None or s.data_date != today_iso:
+                continue
+            summaries.append(s)
         return self._sort_top(summaries, n, by=by, direction=direction)
 
     def top_history(
@@ -341,7 +360,7 @@ class FlowService:
         out: dict[str, tuple[str, Decimal]] = {}
         # 强制重置节流（让监控模式能每轮都拿到最新市值）
         for code in codes:
-            self.adapter._last_fetch_attempt[f"quote:{code}"] = datetime.min.replace(tzinfo=UTC)
+            self.adapter.reset_fetch_throttle(f"quote:{code}")
         for code in codes:
             try:
                 q = self.adapter.get_quote(code)
@@ -360,7 +379,12 @@ class FlowService:
         return out
 
     def show(self, code: str, days: int = 30) -> dict[str, Any]:
-        """查单只：当日 + 最近 N 天历史 + 缓存新鲜度。"""
+        """查单只：当日 + 最近 N 天历史 + 缓存新鲜度。
+
+        当日部分附带 ``today_data_date``（缓存数据交易日，空 = 无缓存/未知），
+        消费方据此判断是否当日数据——跨交易日缓存不当当日展示（P3 契约）。
+        """
+        today_iso = beijing_trade_date(_utcnow())
         today = self._summarize_today_from_cache(code)
         history_raw = self.store.get_money_flow_history(code)
         history_flows: list[MoneyFlow] = []
@@ -371,6 +395,8 @@ class FlowService:
         return {
             "code": code,
             "today": today,
+            "today_data_date": today.data_date if today is not None else "",
+            "today_is_current": today is not None and today.data_date == today_iso,
             "history": history,
             "history_days_cached": len({f.timestamp.strftime("%Y-%m-%d") for f in history_flows}),
         }

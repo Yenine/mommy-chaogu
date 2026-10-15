@@ -129,7 +129,14 @@ def cmd_flows_show(args: argparse.Namespace) -> int:
     print("─" * 60)
     today = info.get("today")
     if today:
-        print("📌 当日（最新快照）:")
+        # 数据日期契约（P3）：跨交易日缓存的"当日"必须标注数据日期；
+        # 日期未知（旧库迁移前 NULL 行）同样不是当日，按非当日标注
+        if not info.get("today_is_current", False):
+            data_date = info.get("today_data_date", "")
+            date_note = f"数据日期 {data_date}" if data_date else "数据日期未知"
+            print(f"📌 当日（{date_note}，非当日缓存）:")
+        else:
+            print("📌 当日（最新快照）:")
         print(f"   主力净:   {_format_yi(today.main_net)}")
         print(
             f"   大资金净: {_format_yi(today.big_money_net())}  "
@@ -214,14 +221,23 @@ def cmd_flows_run(args: argparse.Namespace) -> int:
 
 def cmd_flows_report(args: argparse.Namespace) -> int:
     """生成收盘日报（markdown）。"""
+    from datetime import UTC, datetime
     from datetime import date as _date
 
     from mommy_chaogu.flows import FlowReport
+    from mommy_chaogu.market_data.time_utils import beijing_trade_date
 
     pool = _flows_resolve_pool(args)
     service = _flows_service(args)
     reporter = FlowReport(service)
-    day = _date.fromisoformat(args.day) if args.day else _date.today()
+    # 默认日与 FlowReport.generate 的当日基准同为北京交易日（P3 数据日期
+    # 契约）：非北京时区机器上 _date.today() 可能落后北京一天，显式传入
+    # 会被 generate 判成 --day 补历史而跳过当日校验
+    day = (
+        _date.fromisoformat(args.day)
+        if args.day
+        else _date.fromisoformat(beijing_trade_date(datetime.now(UTC)))
+    )
     output = (
         Path(args.output)
         if args.output

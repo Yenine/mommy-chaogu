@@ -27,6 +27,7 @@ from typing import Any
 from mommy_chaogu.agent.episodic_memory import EpisodicMemory
 from mommy_chaogu.agent.scan_prompt import SCAN_PROMPT_TEMPLATE
 from mommy_chaogu.agent.service import AgentService
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
 from mommy_chaogu.push import SignalNotifier
 from mommy_chaogu.signals.types import Signal, SignalSeverity
@@ -134,11 +135,13 @@ class AgentMonitor:
         }
 
     def _get_latest_flow(self, code: str) -> Any:
-        """拉单只股票当日最新资金流，失败返回 None。"""
+        """拉单只股票当日最新资金流，失败返回 None。
+
+        每日累计取末条契约（flows/cumulative）：当日序列的末条才是当前累计。
+        """
         try:
             flows = self.adapter.get_today_money_flow(code)
-            if flows:
-                return flows[-1]
+            return latest_money_flow(flows)
         except Exception as e:
             _log.debug("get_today_money_flow(%s) failed: %s", code, e)
         return None

@@ -88,6 +88,24 @@ test('/ 菜单：过滤、↑↓ 选择、Enter 执行；/quote 渲染表格', a
   await expect(log.locator('td.rise')).toHaveText('+1.85%')
 })
 
+test('/flows：资金流上游失败（503）渲染可见错误行，不渲染 0 值表', async ({ page }) => {
+  await mockApi(page)
+  // 现契约：上游无数据/请求失败 → HTTP 503（不再返回全 0 的 cumulative）
+  await page.route('**/api/quotes/*/money_flow/today', (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ detail: '当日资金流不可用（上游无数据或请求失败）' }),
+    }),
+  )
+  await page.goto('/')
+  await ask(page, '/flows 600519')
+  const log = page.getByTestId('chat-log')
+  await expect(log).toContainText('资金流 600519：行情源暂时不可用，稍后重试')
+  await expect(log.locator('table')).toHaveCount(0)
+  await expect(log).not.toContainText('0.00亿')
+})
+
 test('一轮对话：工具进时间线、写操作确认、流式回答、token 累计', async ({ page }) => {
   await mockApi(page)
   const received = await mockAgent(page, (ws, msg) => {

@@ -2,7 +2,7 @@
 
 数据源：
 - 腾讯日 K 线（web.ifzq.gtimg.cn）— 24 天 OHLCV
-- 东财历史资金流（efinance adapter）— 21 天主力净流入 + ratio
+- 东财历史资金流（efinance adapter）— 21 天主力净流入 + 占成交额占比（%）
 - 东财公告（np-anotice-stock.eastmoney.com）
 
 流程：
@@ -26,6 +26,7 @@ from backtest_stats import compute_buyhold_baseline, format_hit_rate
 
 from mommy_chaogu.backtest.scoring import score_direction
 from mommy_chaogu.db_paths import AGENT_DB
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s %(message)s")
 _log = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ def fetch_efinance_history(code: str) -> list[dict[str, Any]]:
     """拉东财历史资金流。
 
     Returns:
-        [{date: "2026-06-04", main_net: float, ratio: float}, ...]
+        [{date: "2026-06-04", main_net: float, main_net_pct: float}, ...]
     """
     try:
         from mommy_chaogu.market_data.efinance_adapter import EfinanceAdapter
@@ -102,10 +103,15 @@ def fetch_efinance_history(code: str) -> list[dict[str, Any]]:
 
         result = []
         for f in flows:
-            date_str = f.timestamp.strftime("%Y-%m-%d") if f.timestamp else ""
+            # efinance 资金流时间戳是 aware UTC（北京墙时间换算而来），raw
+            # strftime 会把北京日期落成前一天；按北京交易日取（P1 收口）。
+            date_str = beijing_trade_date(f.timestamp) if f.timestamp else ""
             main_net = float(f.main_net.amount) if f.main_net else 0.0
-            ratio = float(f.main_net_ratio) if f.main_net_ratio else 0.0
-            result.append({"date": date_str, "main_net": main_net, "ratio": ratio})
+            # main_net_ratio = 主力净流入占**成交额**的 %（5.2 = 5.2%）；不是
+            # flows 域/回测引擎的 ratio（主力净流入÷流通市值，bp 口径）。
+            # 按真实口径命名 main_net_pct，下游规则阈值 / rationale 同用 % 单位。
+            main_net_pct = float(f.main_net_ratio) if f.main_net_ratio else 0.0
+            result.append({"date": date_str, "main_net": main_net, "main_net_pct": main_net_pct})
 
         return result
     except Exception as e:
@@ -221,52 +227,54 @@ def generate_predictions(
     if not flow or not close or not prev_close or prev_close == 0:
         return preds
 
-    ratio_bp = flow["ratio"]
+    # 主力净流入占成交额 %（口径见 fetch_efinance_history）；阈值按 % 读：
+    # 5 = 5%、10 = 10%（历史上误标 ratio_bp，数值阈值不变，只修单位语义）。
+    main_net_pct = flow["main_net_pct"]
     price_change = (close - prev_close) / prev_close * 100
 
     # 规则 1：主力大幅流入 + 涨 → bullish
-    if ratio_bp > 5 and price_change > 0:
+    if main_net_pct > 5 and price_change > 0:
         preds.append(
             {
                 "direction": "bullish",
                 "entry_price": close,
-                "rationale": f"主力 ratio {ratio_bp:+.1f}bp + 涨 {price_change:+.1f}%",
+                "rationale": f"主力占比 {main_net_pct:+.1f}%（占成交额）+ 涨 {price_change:+.1f}%",
                 "strength": "normal",
                 "rule": "flow_in_price_up",
             }
         )
 
     # 规则 2：主力大幅流出 + 跌 → bearish
-    elif ratio_bp < -5 and price_change < 0:
+    elif main_net_pct < -5 and price_change < 0:
         preds.append(
             {
                 "direction": "bearish",
                 "entry_price": close,
-                "rationale": f"主力 ratio {ratio_bp:+.1f}bp + 跌 {price_change:+.1f}%",
+                "rationale": f"主力占比 {main_net_pct:+.1f}%（占成交额）+ 跌 {price_change:+.1f}%",
                 "strength": "normal",
                 "rule": "flow_out_price_down",
             }
         )
 
-    # 规则 3：极端流入（>10bp）
-    if ratio_bp > 10:
+    # 规则 3：极端流入（占成交额 >10%）
+    if main_net_pct > 10:
         preds.append(
             {
                 "direction": "bullish",
                 "entry_price": close,
-                "rationale": f"极端流入 ratio {ratio_bp:+.1f}bp",
+                "rationale": f"极端流入 占比 {main_net_pct:+.1f}%（占成交额）",
                 "strength": "strong",
                 "rule": "extreme_inflow",
             }
         )
 
-    # 规则 4：极端流出（< -10bp）
-    if ratio_bp < -10:
+    # 规则 4：极端流出（占成交额 <-10%）
+    if main_net_pct < -10:
         preds.append(
             {
                 "direction": "bearish",
                 "entry_price": close,
-                "rationale": f"极端流出 ratio {ratio_bp:+.1f}bp",
+                "rationale": f"极端流出 占比 {main_net_pct:+.1f}%（占成交额）",
                 "strength": "strong",
                 "rule": "extreme_outflow",
             }
@@ -632,12 +640,12 @@ def run_backtest(db_path: str = str(AGENT_DB)) -> None:
         normal_rate = normal_hits / normal_verifiable
         if strong_rate > normal_rate:
             patterns.append(
-                f"极端信号（ratio >10bp）命中率 {strong_rate:.0%}，"
-                f"高于普通信号（5-10bp）{normal_rate:.0%}。大信号更可信。"
+                f"极端信号（主力占成交额 >10%）命中率 {strong_rate:.0%}，"
+                f"高于普通信号（5-10%）{normal_rate:.0%}。大信号更可信。"
             )
         else:
             patterns.append(
-                f"普通信号（5-10bp）命中率 {normal_rate:.0%}，"
+                f"普通信号（主力占成交额 5-10%）命中率 {normal_rate:.0%}，"
                 f"与极端信号 {strong_rate:.0%} 差异不大。"
             )
 

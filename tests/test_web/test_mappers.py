@@ -138,6 +138,9 @@ class TestBarToOut:
         assert out.close == Decimal("1680.00")
         assert out.volume == 10000000
         assert isinstance(out.volume, int)
+        assert out.trade_date == "2026-06-27"
+        assert out.adjustment == "forward"
+        assert out.currency == "CNY"
 
     def test_turnover_from_money(self) -> None:
         bar = make_bar()

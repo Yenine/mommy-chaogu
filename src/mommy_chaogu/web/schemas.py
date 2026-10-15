@@ -56,6 +56,9 @@ class BarOut(BaseModel):
     """K 线一根。"""
 
     timestamp: datetime
+    trade_date: str
+    adjustment: str
+    currency: str
     open: Decimal
     high: Decimal
     low: Decimal
@@ -74,6 +77,52 @@ class OrderBookOut(BaseModel):
     timestamp: datetime
     bids: list[OrderBookLevelOut]
     asks: list[OrderBookLevelOut]
+
+
+# ---------- Money Flow ----------
+
+
+class FlowItemOut(BaseModel):
+    """单条资金流（当日条目是到该时刻的累计值，历史条目是单日值）。"""
+
+    timestamp: datetime
+    main_net: Decimal
+    super_net: Decimal | None = None  # 超大单净流入（元）
+    big_net: Decimal | None = None  # 大单净流入（元）
+    medium_net: Decimal | None = None  # 中单净流入（元）
+    small_net: Decimal | None = None  # 小单净流入（元）
+    main_ratio: Decimal | None = None  # 主力净流入占成交额 %（efinance 口径）
+
+
+class HistoryFlowItemOut(FlowItemOut):
+    """历史单日条目（多一个 YYYY-MM-DD 日期列）。"""
+
+    date: str
+
+
+class FlowCumulativeOut(BaseModel):
+    """资金流累计汇总（当日 = 末条累计值；历史 = 整段求和）。"""
+
+    main_net: Decimal
+    super_net: Decimal
+    big_net: Decimal
+    medium_net: Decimal
+    small_net: Decimal
+
+
+class TodayFlowOut(BaseModel):
+    """GET /api/quotes/{code}/money_flow/today 响应。"""
+
+    items: list[FlowItemOut]
+    cumulative: FlowCumulativeOut
+
+
+class HistoryFlowOut(BaseModel):
+    """GET /api/quotes/{code}/money_flow/history 响应。"""
+
+    items: list[HistoryFlowItemOut]
+    cumulative: FlowCumulativeOut
+    days: int
 
 
 class WatchlistStockOut(BaseModel):

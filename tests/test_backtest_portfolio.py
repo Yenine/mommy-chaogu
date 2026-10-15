@@ -1,4 +1,4 @@
-"""组合回测 ``mommy_chaogu.backtest.portfolio`` 的端到端测试。"""
+"""交易级简化收益汇总 ``mommy_chaogu.backtest.portfolio`` 的端到端测试。"""
 
 from __future__ import annotations
 
@@ -253,11 +253,12 @@ def test_equal_mode_flags_lookahead_caveat() -> None:
     assert any("前视" in c for c in res.caveats)
 
 
-def test_sequential_mode_has_no_lookahead_caveat() -> None:
-    """sequential 按当时净值固定比例分配，无前视，无 caveat。"""
+def test_all_modes_show_simplified_caveat() -> None:
+    """所有模式都披露交易级简化组合的口径限制。"""
     bt = PortfolioBacktester()
     res = bt.simulate([_bull("2026-06-01", 5.0)], position_size="sequential")
-    assert res.caveats == []
+    assert any("交易级简化收益汇总" in caveat for caveat in res.caveats)
+    assert any("可执行收益" in caveat for caveat in res.caveats)
 
 
 def test_sequential_sizing_matches_hand_computation() -> None:

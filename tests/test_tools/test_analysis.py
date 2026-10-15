@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 from mommy_chaogu.agent.tools import ToolContext, analysis
 from mommy_chaogu.market_data.types import AdjustmentType, Bar, BarInterval, Money, MoneyFlow
@@ -114,6 +116,63 @@ def test_volume_breakout_uses_completed_bar() -> None:
         )
     )
     assert result["results"][0]["volume_ratio"] == "2"
+
+
+def test_completed_daily_bars_uses_beijing_date_and_close_buffer() -> None:
+    """生产 A 股北京午夜标签不能按 UTC 前一天提前进入信号。"""
+    utc_midnight_bar = replace(
+        _bar("600519", 0, "100", 100),
+        timestamp=datetime(2026, 7, 1, 16, tzinfo=UTC),
+    )
+    future_bar = replace(
+        _bar("600519", 1, "101", 100),
+        timestamp=datetime(2026, 7, 2, 16, tzinfo=UTC),
+    )
+
+    before_close = analysis._completed_daily_bars(
+        [utc_midnight_bar, future_bar],
+        now=datetime(2026, 7, 2, 10),
+    )
+    after_close = analysis._completed_daily_bars(
+        [utc_midnight_bar, future_bar],
+        now=datetime(2026, 7, 2, 15, 5),
+    )
+
+    assert before_close == []
+    assert [bar.close for bar in after_close] == [Decimal("100")]
+
+
+def test_completed_daily_bars_normalizes_equivalent_utc_shanghai_ny_inputs() -> None:
+    """同一时刻的 UTC、上海和纽约标签应有相同的北京收盘判定。"""
+    timestamp = datetime(2026, 7, 1, 16, tzinfo=UTC)
+    bars = [
+        replace(
+            _bar("600519", 0, "100", 100),
+            timestamp=timestamp.astimezone(zone),
+        )
+        for zone in (UTC, ZoneInfo("Asia/Shanghai"), ZoneInfo("America/New_York"))
+    ]
+    before_nows = (
+        datetime(2026, 7, 2, 7, 4, tzinfo=UTC),
+        datetime(2026, 7, 2, 15, 4, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 2, 3, 4, tzinfo=ZoneInfo("America/New_York")),
+    )
+    after_nows = (
+        datetime(2026, 7, 2, 7, 5, tzinfo=UTC),
+        datetime(2026, 7, 2, 15, 5, tzinfo=ZoneInfo("Asia/Shanghai")),
+        datetime(2026, 7, 2, 3, 5, tzinfo=ZoneInfo("America/New_York")),
+    )
+    before_close = [
+        analysis._completed_daily_bars([bar], now=now)
+        for bar, now in zip(bars, before_nows, strict=True)
+    ]
+    after_close = [
+        analysis._completed_daily_bars([bar], now=now)
+        for bar, now in zip(bars, after_nows, strict=True)
+    ]
+
+    assert before_close == [[], [], []]
+    assert [len(result) for result in after_close] == [1, 1, 1]
 
 
 def test_ma_golden_cross_is_detected_recently() -> None:
@@ -275,7 +334,7 @@ def test_count_stays_hit_count_and_evidence_is_capped() -> None:
 
 
 def test_payload_carries_unverified_adjustment_note() -> None:
-    """复权语义未核验的既定边界：输出带「未复权口径」标注。"""
+    """复权语义未核验时不把 provider 默认值误报成不复权。"""
     adapter = MagicMock()
     adapter.get_bars.return_value = [_bar("600519", i, "100", 100) for i in range(21)]
     result = _payload(
@@ -283,7 +342,8 @@ def test_payload_carries_unverified_adjustment_note() -> None:
             ToolContext(adapter=adapter), {"codes": ["600519"], "signal": "high_20_breakout"}
         )
     )
-    assert "未复权" in result["note"]
+    assert "实际复权口径" in result["note"]
+    assert "未核验" in result["note"]
 
 
 def test_invalid_signal_error_lists_all_enums() -> None:

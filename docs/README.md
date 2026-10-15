@@ -28,6 +28,7 @@
 
 ## 发布与质量
 
+- [SYSTEMATIC-REVIEW-GUIDE.md](SYSTEMATIC-REVIEW-GUIDE.md) — 系统性审查流程、时间与数据契约、研究边界、发布一致性及证据模板
 - [RELEASE-CHECKLIST.md](RELEASE-CHECKLIST.md) — v1.0.0 发布门禁清单
 - [TECH-DEBT.md](TECH-DEBT.md) — 技术债台账（mypy 豁免清单、测试告警、待决策项）
 

@@ -116,6 +116,11 @@ def default_rules() -> list[FlowRule]:
             severity=Severity.WARN,
             metric="delta_5min",
             direction="in",
+            # 阈值 5bp：数值有意与 backtest/engine.py 的 SPIKE_THRESHOLD 对齐，
+            # 但度量不同——本规则是 5 分钟 delta ratio（盘中异动），回测侧是
+            # 日累计 ratio（main_net ÷ 流通市值）回放阈值。两侧刻意保持独立
+            # 常量、禁止 import 耦合；数值若要调整须双侧同步，
+            # tests/test_flows/test_cumulative_contract.py 有哨兵断言。
             threshold_bp=Decimal("5"),
             description="5min 内主力净流入 ratio 上升 > 5bp",
         ),

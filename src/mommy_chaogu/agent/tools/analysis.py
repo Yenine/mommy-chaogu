@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from mommy_chaogu.agent.tools.base import (
     ToolContext,
@@ -19,6 +20,7 @@ from mommy_chaogu.agent.tools.base import (
     _floatify,
     _json,
 )
+from mommy_chaogu.flows.cumulative import latest_money_flow
 from mommy_chaogu.market_data.fundamentals_api import get_fundamentals
 from mommy_chaogu.market_data.news_api import get_announcements
 from mommy_chaogu.market_data.rankings import INDEX_CODES
@@ -32,6 +34,8 @@ MAX_CODES = 50
 MAX_RESULTS = 20
 FLOW_BATCH_SIZE = 10
 
+_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
+
 # check_kline_signal 支持的日线信号枚举。high_20_breakout / price_above_ma20
 # 是「短期右侧确认」信号（docs/plans/trading-method-landing.md 阶段一）。
 _KLINE_SIGNALS = frozenset(
@@ -39,8 +43,11 @@ _KLINE_SIGNALS = frozenset(
 )
 
 # get_bars 日 K 的复权/时点语义未核验（docs/plans/trading-method-landing.md
-# §2 阶段一边界），核验前 K 线信号输出统一带该标注——消费方按未复权口径解读。
-_UNVERIFIED_ADJUSTMENT_NOTE = "K线复权语义未核验，信号按未复权口径解读"
+# §2 阶段一边界）。不要把 provider 默认值推断成「不复权」；输出沿用
+# 返回 K 线的实际口径，并把跨口径可比性限制交给消费方。
+_UNVERIFIED_ADJUSTMENT_NOTE = (
+    "K线复权语义及跨口径可比性未核验；信号沿用返回K线的实际复权口径，仅作探索性观察"
+)
 
 DEFS: list[ToolDef] = [
     ToolDef(
@@ -91,7 +98,8 @@ DEFS: list[ToolDef] = [
             "完成日 K 的最高高点，price_above_ma20 为收盘站上 MA20。"
             "results 只含命中记录；evidence 逐只给出判定依据"
             "（hit/high_20/ma20/close/bars_used，未命中也输出）。"
-            "K 线复权语义未核验，按未复权口径解读。"
+            "K 线复权语义及跨口径可比性未核验；信号沿用返回 K 线的实际复权口径，"
+            "仅作探索性观察。"
         ),
         parameters={
             "type": "object",
@@ -204,9 +212,13 @@ def _handle_screen_inflow_stocks(ctx: ToolContext, args: dict[str, Any]) -> str:
     for start in range(0, len(codes), FLOW_BATCH_SIZE):
         for code in codes[start : start + FLOW_BATCH_SIZE]:
             flows = ctx.adapter.get_today_money_flow(code)
-            if not flows:
+            latest = latest_money_flow(flows)  # 每日累计取末条契约（flows/cumulative）
+            if latest is None:
                 continue
-            latest = flows[-1]
+            # 已知口径混用（先于 P5，待单独授权修复）：主路径 main_net_ratio 是
+            # 主力净流入占**成交额**的 %；缺失时的 fallback 用占**流通市值**的 %
+            # （分母不同）补位，两者 ×100 后进同一个 ratio_bp 输出与同一阈值
+            # 比较——工具主口径是占成交额，fallback 仅在源缺失时近似。
             ratio_pct = _number(latest.main_net_ratio)
             if ratio_pct is None:
                 quote = ctx.adapter.get_quote(code)
@@ -261,16 +273,40 @@ def _handle_check_earnings_catalyst(ctx: ToolContext, args: dict[str, Any]) -> s
     return _contract(_floatify(results))
 
 
+def _beijing_timestamp(value: datetime) -> datetime:
+    """Normalize a timestamp for A-share trading-day comparisons.
+
+    Production adapters return aware UTC timestamps whose daily bars start at
+    Beijing midnight (the preceding UTC day at 16:00).  A few historical
+    adapters and fixtures still return naive values; preserve their existing
+    wall-clock meaning by treating them as Beijing time rather than allowing
+    the host machine timezone to decide the trading day.
+    """
+    if value.tzinfo is None:
+        return value.replace(tzinfo=_TZ_BEIJING)
+    return value.astimezone(_TZ_BEIJING)
+
+
 def _completed_daily_bars(bars: list[Any], now: datetime | None = None) -> list[Any]:
-    ordered = sorted(bars, key=lambda bar: bar.timestamp)
+    """Return completed A-share daily bars using Beijing market time.
+
+    A daily bar for the current Beijing date is withheld until the 15:05
+    close buffer.  Future-dated bars are always excluded, which prevents
+    corrected/future cache rows from entering a current signal calculation.
+    """
+    ordered = sorted(bars, key=lambda bar: _beijing_timestamp(bar.timestamp))
     if not ordered:
         return []
-    current = now or datetime.now()
-    last = ordered[-1]
-    # A daily bar dated today is incomplete until the regular A-share close.
-    if last.timestamp.date() == current.date() and current.time() < time(15, 5):
-        return ordered[:-1]
-    return ordered
+    current = _beijing_timestamp(now) if now is not None else datetime.now(_TZ_BEIJING)
+    completed: list[Any] = []
+    for bar in ordered:
+        bar_local = _beijing_timestamp(bar.timestamp)
+        if bar_local.date() > current.date():
+            continue
+        if bar_local.date() == current.date() and current.time() < time(15, 5):
+            continue
+        completed.append(bar)
+    return completed
 
 
 def _bar_change_pct(bar: Any) -> Decimal:

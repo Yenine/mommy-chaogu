@@ -16,11 +16,11 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from mommy_chaogu.cache.config import CacheConfig
 from mommy_chaogu.cache.store import CacheStore, QuoteCacheEntry, is_minute_interval
 from mommy_chaogu.market_data import MarketDataAdapter, Quote
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import (
     AdjustmentType,
     Bar,
@@ -33,17 +33,24 @@ from mommy_chaogu.market_data.types import (
 
 _log = logging.getLogger(__name__)
 
+#: ``last_source`` 的完整词汇表（单一真相源）：缓存装饰器对外标注的全部
+#: 取值。跨层一致性测试（tests/test_source_vocabulary.py）从本常量参数化
+#: ——TUI 警示集合、format_source_label 映射或 verify_engine 透传漏改
+#: 任一消费方时在测试失败，而不是把英文 token 裸显给用户。
+SOURCE_VALUES: tuple[str, ...] = (
+    "network",
+    "network_empty",
+    "network_error",
+    "cache",
+    "stale_cache",
+    "snapshot",
+    "stale_snapshot",
+    "",
+)
+
 # K 线交易日历：时间戳统一 aware UTC 后，直接 strftime 会把北京午夜
-# （UTC 前一天 16:00）落到错误的日期，落库 trade_date 必须按北京时区取。
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
-
-
-def _bar_trade_date(ts: datetime) -> str:
-    """K 线时间戳 → 北京时区的交易日字符串（YYYY-MM-DD）。"""
-    if ts.tzinfo is None:
-        # 防御：naive 视为北京墙时间（与 F2 之前 adapter 的历史语义一致）
-        ts = ts.replace(tzinfo=_TZ_BEIJING)
-    return ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
+# （UTC 前一天 16:00）落到错误的日期，落库 trade_date 必须按北京时区取
+# （单一真相源 market_data/time_utils.beijing_trade_date）。
 
 
 def _bar_to_cache_dict(
@@ -100,8 +107,11 @@ class CachedMarketDataAdapter:
             "fetch_fail": 0,
             "miss": 0,
         }
-        # 最近一次数据来源（供调用方感知数据新鲜度）
-        self.last_source: str = ""  # "network", "network_empty", "cache", "stale_cache", "snapshot", "stale_snapshot", ""
+        # 最近一次数据来源（供调用方感知数据新鲜度；词汇表见 SOURCE_VALUES）
+        self.last_source: str = ""
+        # K 线来源按请求 key 隔离；last_source 是历史兼容的展示字段，不能
+        # 作为另一个 code/口径请求的状态存储。
+        self._bar_last_source: dict[str, str] = {}
         # 最近一次资金流数据所属交易日（北京时区 YYYY-MM-DD）——跨日 stale 时标注给调用方
         self.last_source_trade_date: str = ""
 
@@ -121,6 +131,24 @@ class CachedMarketDataAdapter:
 
     def _mark_fetched(self, key: str) -> None:
         self._last_fetch_attempt[key] = _utcnow()
+
+    def reset_fetch_throttle(self, key: str) -> None:
+        """重置某 key 的拉新节流，让下一次读取强制发起拉新（公开契约）。
+
+        key 形如 ``quote:600519`` / ``today_flow:600519`` / ``history_flow:600519``
+        / ``market_snapshot:all`` / ``bar:<code>:<interval>:<adj>``。强制拉新
+        （warmup / refresh / force）一律走本方法，不要直改 ``_last_fetch_attempt``。
+        """
+        self._last_fetch_attempt.pop(key, None)
+
+    def source_snapshot(self) -> tuple[str, str]:
+        """当前 ``(last_source, last_source_trade_date)`` 的拷贝。
+
+        调用方在完成某次读取后立即快照，之后其他方法对共享来源字段的
+        改写不会污染该快照（与 bars 的 per-key 来源先例同一意图：把
+        「这次数据从哪来」从可变实例状态里分离出来）。
+        """
+        return (self.last_source, self.last_source_trade_date)
 
     # ============================================================
     # 实时报价
@@ -375,7 +403,7 @@ class CachedMarketDataAdapter:
                 # ——读取侧由 _read_cache 做并集。
                 by_day: dict[tuple[str, str], list[dict[str, Any]]] = {}
                 for bar in fresh:
-                    trade_date = _bar_trade_date(bar.timestamp)
+                    trade_date = beijing_trade_date(bar.timestamp)
                     by_day.setdefault((bar.adjustment.value, trade_date), []).append(
                         _bar_to_cache_dict(bar, interval_str, adj_str, keep_bar_adjustment=True)
                     )
@@ -389,7 +417,7 @@ class CachedMarketDataAdapter:
                 return
 
             for bar in fresh:
-                trade_date = _bar_trade_date(bar.timestamp)
+                trade_date = beijing_trade_date(bar.timestamp)
                 bar_dict = _bar_to_cache_dict(bar, interval_str, adj_str)
                 try:
                     self.store.set_bar(code, interval_str, adj_str, trade_date, bar_dict)
@@ -397,11 +425,21 @@ class CachedMarketDataAdapter:
                     _log.error("cache set_bar failed: %s", e)
 
         cached_bars = _read_cache()
+        source_set = False
+
+        def _set_bar_source(source: str) -> None:
+            """Publish this request's source without inheriting another key."""
+            nonlocal source_set
+            source_set = True
+            self._bar_last_source[key] = source
+            self.last_source = source
 
         if not cached_bars:
             # 该区间内无缓存 → 尝试拉新（节流窗口内不重复打上游）
             if not self._should_fetch(key, fetch_window):
-                self.last_source = "cache"
+                # 节流命中但仍没有缓存时，不能把空结果称为 cache；底层
+                # 失败/空响应与尚未确认的无数据在此契约下都属于不可用。
+                _set_bar_source("network_error")
                 return []
             self._mark_fetched(key)
             self.stats_counters["fetches"] += 1
@@ -418,16 +456,22 @@ class CachedMarketDataAdapter:
             except Exception as e:
                 self.stats_counters["fetch_fail"] += 1
                 _log.warning("fetch bars(%s) failed: %s", code, e)
-                self.last_source = "cache"
+                _set_bar_source("network_error")
                 return []
 
             # 底层 adapter 可能违反 list 契约返回 None → 当作无数据
             if fresh is None:
-                self.last_source = "cache"
+                _set_bar_source("network_error")
+                return []
+
+            # 空列表无法区分「确认无数据」和底层多源失败；不要把它
+            # 暴露成 network_empty，也不要写入或覆盖任何缓存。
+            if not fresh:
+                _set_bar_source("network_error")
                 return []
 
             _persist(fresh)
-            self.last_source = "network"
+            _set_bar_source("network")
             return fresh
 
         # 区间内有缓存 → 节流窗口外尝试增量拉新，拉新后重读缓存
@@ -444,7 +488,7 @@ class CachedMarketDataAdapter:
                     limit=limit,
                 )
                 self.stats_counters["fetch_ok"] += 1
-                if fresh is not None:
+                if fresh:
                     _persist(fresh)
                     refreshed = _read_cache()
                     # 分钟周期防坍缩兜底：重读缓存若仍少于 fresh（如部分日
@@ -463,12 +507,25 @@ class CachedMarketDataAdapter:
                         ]
                     elif refreshed:
                         cached_bars = refreshed
+                    _set_bar_source("network")
+                else:
+                    # 空/None 不能证明上游确认无数据；本次继续返回旧缓存。
+                    _set_bar_source("stale_cache")
             except Exception as e:
                 _log.warning("refetch bars(%s) failed (using cache): %s", code, e)
+                _set_bar_source("stale_cache")
 
         # 从缓存构造 Bar 列表
         self.stats_counters["hits"] += 1
-        self.last_source = "cache"
+        if not source_set:
+            # 同一请求 key 在上一次拉新失败后进入节流窗口时，继续把旧
+            # 数据标为 stale；另一个 code/口径的来源不会污染本次请求。
+            previous_source = self._bar_last_source.get(key)
+            _set_bar_source("stale_cache" if previous_source == "stale_cache" else "cache")
+        else:
+            # Keep the source from this key's refetch attempt visible even if
+            # another adapter method ran between the fetch and return.
+            self.last_source = self._bar_last_source[key]
 
         bars: list[Bar] = []
         for bar_dict in cached_bars:
@@ -533,7 +590,7 @@ class CachedMarketDataAdapter:
           仅当无旧缓存时才把它作为「确认无数据」写入并标 ``network_empty``（与失败可区分）。
         """
         entry = self.store.get_today_money_flow_entry(code)
-        today = _bar_trade_date(_utcnow())
+        today = beijing_trade_date(_utcnow())
         key = f"today_flow:{code}"
 
         due = self._should_fetch(key, self.config.today_money_flow_fetch_interval_seconds)
@@ -696,9 +753,17 @@ class CachedMarketDataAdapter:
 
     def format_source_label(self) -> str:
         """返回用户可读的数据来源标注，如 '东方财富 实时' 或 '本地缓存'。"""
-        if not self.last_source:
+        return self.format_source_label_from(self.last_source, self.last_source_trade_date)
+
+    def format_source_label_from(self, source: str, trade_date: str) -> str:
+        """按 ``(source, trade_date)`` 快照渲染用户可读标签。
+
+        与实例当前状态解耦：调用方用 :meth:`source_snapshot` 取到的快照
+        渲染，不会被之后其他方法的改写影响（报价 + 资金流 join 场景）。
+        """
+        if not source:
             return ""
-        if self.last_source in ("network", "snapshot"):
+        if source in ("network", "snapshot"):
             inner_name = getattr(self.inner, "__class__", None)
             inner_name = inner_name.__name__ if inner_name else ""
             if "Efinance" in inner_name:
@@ -707,17 +772,19 @@ class CachedMarketDataAdapter:
                 label = "腾讯财经 实时"
             else:
                 label = "实时数据"
-        elif self.last_source == "network_empty":
+        elif source == "network_empty":
             label = "实时数据（当日无资金流数据）"
-        elif self.last_source == "cache":
+        elif source == "network_error":
+            label = "行情源不可用（无可用缓存）"
+        elif source == "cache":
             label = "本地缓存"
-        elif self.last_source in ("stale_cache", "stale_snapshot"):
+        elif source in ("stale_cache", "stale_snapshot"):
             # 拉新失败后翻出的旧数据——与"刚缓存"区分，妈妈看得见可能过期
             label = "本地缓存（拉新失败，可能过期）"
         else:
-            label = self.last_source
-        if self.last_source_trade_date:
-            label = f"{label}｜数据日期 {self.last_source_trade_date}"
+            label = source
+        if trade_date:
+            label = f"{label}｜数据日期 {trade_date}"
         return label
 
 

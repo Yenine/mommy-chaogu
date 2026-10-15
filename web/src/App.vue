@@ -35,7 +35,6 @@ import type { Msg, ToolCall, TurnInfo } from '@/lib/messages'
 import { THEME_LABELS, isTheme, loadTheme, saveTheme, themeList, type ThemeName } from '@/lib/themes'
 
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const DENIED = '用户拒绝了该操作'
 const PANEL_W = 420
 
 // ---------------------------------------------------------------- 状态
@@ -85,6 +84,13 @@ let thinkingIdx: number | null = null
 let turnFailed = false
 let turnInterrupted = false
 
+// esc 中断守卫：REST 请求（工作流路由 / 斜杠命令）无法真正取消，只能等它
+// 迟到返回——epoch 对不上就丢弃，保证「已中断」之后不再冒出结果。
+// 两条路径各用一个计数器，互不牵连；interrupt() 两个都作废。
+let routeEpoch = 0
+let dataEpoch = 0
+let routeAbort: AbortController | null = null
+
 // ---------------------------------------------------------------- 后端事件
 const agent = new AgentSocket({
   thinkingDelta(text) {
@@ -103,12 +109,12 @@ const agent = new AgentSocket({
     tools.value.push(t)
     msgs.value.push({ kind: 'tool', id: t.id })
   },
-  toolFinished(name, ok, elapsedMs, result) {
+  toolFinished(name, status, elapsedMs, result) {
     const t = tools.value.find((x) => x.turn === turnNo && x.name === name && x.status === 'running')
     if (!t) return
     t.end = elapsedMs && t.start ? t.start + elapsedMs : Date.now()
     t.result = result
-    t.status = ok ? 'done' : result === DENIED ? 'denied' : 'failed'
+    t.status = status
     if (t.status === 'failed') mascotEvent.value = { kind: 'fail', at: Date.now() }
   },
   confirm(req) {
@@ -198,33 +204,47 @@ function endTurn() {
 async function startTurn(text: string) {
   msgs.value.push({ kind: 'user', text })
   beginTurn(text, '研究中')
+  const epoch = ++routeEpoch
+  const ac = new AbortController()
+  routeAbort = ac
   // 预定义工作流优先（无 AI Key 也可用），未命中再走 Agent 流式对话
+  let route: Awaited<ReturnType<typeof agentRoute>> | null = null
   try {
-    const route = await agentRoute(text)
-    if (route.matched) {
-      busyLabel.value = '执行工作流'
-      const at = Date.now()
-      for (const step of route.steps ?? []) {
-        const t: ToolCall = {
-          id: `t${++uid}`,
-          turn: turnNo,
-          name: step.tool || step.name,
-          args: step.tool && step.name !== step.tool ? { step: step.name } : {},
-          status: step.success ? 'done' : 'failed',
-          start: at,
-          end: at,
-          result: step.success ? '完成' : '失败',
-        }
-        if (!step.success) turnFailed = true
-        tools.value.push(t)
-        msgs.value.push({ kind: 'tool', id: t.id })
-      }
-      msgs.value.push({ kind: 'text', text: route.reply || '工作流执行完成。' })
-      endTurn()
-      return
-    }
+    route = await agentRoute(text, sessionId.value, ac.signal)
   } catch {
     // 路由失败不阻塞：直接交给 Agent
+  } finally {
+    if (routeAbort === ac) routeAbort = null
+  }
+  // esc 中断（abort 或 epoch 作废）：丢弃工作流结果，不再渲染
+  if (epoch !== routeEpoch) {
+    endTurn()
+    return
+  }
+  if (route?.matched) {
+    busyLabel.value = '执行工作流'
+    // 各步耗时用后端实测 elapsed_ms 累加铺到时间线上（旧版 start=end 恒 0ms）
+    let cursor = Date.now()
+    for (const step of route.steps ?? []) {
+      const dur = step.elapsed_ms ?? 0
+      const t: ToolCall = {
+        id: `t${++uid}`,
+        turn: turnNo,
+        name: step.tool || step.name,
+        args: step.tool && step.name !== step.tool ? { step: step.name } : {},
+        status: step.success ? 'done' : 'failed',
+        start: cursor,
+        end: cursor + dur,
+        result: step.success ? '完成' : '失败',
+      }
+      cursor += dur
+      if (!step.success) turnFailed = true
+      tools.value.push(t)
+      msgs.value.push({ kind: 'tool', id: t.id })
+    }
+    msgs.value.push({ kind: 'text', text: route.reply || '工作流执行完成。' })
+    endTurn()
+    return
   }
   void agent.send(text, sessionId.value)
 }
@@ -233,6 +253,11 @@ function interrupt() {
   if (!busy.value) return
   agent.cancel()
   turnInterrupted = true
+  // 作废在途的 REST 结果（工作流路由 / 斜杠命令）：迟到返回按 epoch 丢弃
+  routeEpoch++
+  dataEpoch++
+  routeAbort?.abort()
+  routeAbort = null
   const at = Date.now()
   for (const t of tools.value) {
     if (t.status === 'running') {
@@ -307,7 +332,7 @@ async function runCommand(text: string) {
       if (busy.value) interrupt()
       sessionId.value = resetChatSessionId()
       clearAll()
-      return sys(`已开新会话 ${sessionId.value}（旧会话保留在 /resume 列表）`, 'dim')
+      return sys(`已开新会话 ${sessionId.value}（AI 对话与工作流记录保留在 /resume 列表）`, 'dim')
     case '/resume':
       if (args[0]) {
         if (busy.value) interrupt()
@@ -317,17 +342,21 @@ async function runCommand(text: string) {
         return loadHistory(`已切换到会话 ${args[0]}`)
       }
   }
+  const epoch = ++dataEpoch
   busy.value = true
   busyLabel.value = '读取数据'
   busyStart.value = Date.now()
   try {
     const out = await runDataCommand(cmd, args)
-    if (out) msgs.value.push(...out)
+    // esc 中断后迟到的数据不再渲染（HTTP 请求取消不了，但不让它误导）
+    if (epoch === dataEpoch && out) msgs.value.push(...out)
   } catch (e) {
-    const err = toApiError(e, cmd)
-    // 503 = 后台行情快照还没生成（刚启动的首次轮询），这是正常冷启动，不是故障
-    if (err.status === 503) sys('行情数据还在准备中（服务刚启动，首次拉取行情），稍等几秒再试', 'warn')
-    else sys(`✗ ${err.friendly}`, 'fail')
+    if (epoch === dataEpoch) {
+      const err = toApiError(e, cmd)
+      // 503 = 后台行情快照还没生成（刚启动的首次轮询），这是正常冷启动，不是故障
+      if (err.status === 503) sys('行情数据还在准备中（服务刚启动，首次拉取行情），稍等几秒再试', 'warn')
+      else sys(`✗ ${err.friendly}`, 'fail')
+    }
   } finally {
     busy.value = false
   }

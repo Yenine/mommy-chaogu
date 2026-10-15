@@ -2,6 +2,25 @@
 
 > 给 AI agent（和人类开发者）的项目指南。开始工作前先读这份。
 
+## 审查入口（所有 Agent 共用）
+
+开展架构、正确性、数据、研究或发布审查，以及修改相应核心契约前，必须阅读
+[系统性审查指南](docs/SYSTEMATIC-REVIEW-GUIDE.md)。它服从本文件的产品定位与产品交付原则。
+局部审查按影响范围选用相关检查，不要求每个小改动全面审计；系统性审查必须交代
+Market Time、Data Quality、Quantitative Validation、Release Integrity 四个领域的覆盖与未验证项。
+
+- 先写用户可观察的目标，记录版本、commit 与工作区差异，再沿实际调用链验证；旧报告只是线索。
+- 按 **Audit → Design → Implement → Validate** 推进；区分已证实缺陷、条件性风险、待验证假设。
+  每项重要发现说明触发输入、用户后果、根因、证据、现有测试缺口与兼容性影响。
+- 优先处理静默错误和误导性输出；将关键不变量映射到根因测试与用户验收。
+  测试通过不等于研究有效，更不等于策略可执行。
+- 第一轮默认交付证据审查、必要的架构建议、分阶段计划和测试矩阵。
+  审查请求本身不授权修复、存量数据改写或迁移；已有明确实现授权时继续其授权范围内的工作。
+- 只有证据说明局部修复不足，才提出共用抽象，并比较局部修复、复用与新增抽象的成本。
+  涉及存量金融数据、数据库迁移或重要研究口径变化时，先列影响、验证证据与恢复方案，再按授权实施。
+- 未运行的检查、不可还原的历史信息与未覆盖路径必须明确列出；不得把规范落盘宣称为缺陷修复
+  或系统已通过审计。审查快照落在 `docs/archive/`，稳定原则更新本指南；不得另造产品方向。
+
 ## 快速上手
 
 ```bash
@@ -261,6 +280,7 @@ mommy-chaogu 是直接服务最终用户的应用，不是为其他应用提供�
 - 数据金额一律 `Decimal`，不用 `float`
 - 数据源走 `MarketDataAdapter` Protocol，加新源只实现 Protocol
 - provider 配置只改 `agent/llm.py` 的 `SUPPORTED_PROVIDERS`（service/config/backtest/MCP 全部引用它）；LLM client 一律经 `llm.create_client()` 构造（显式 timeout + 关 SDK 内置重试，重试由应用层统一）
+- adapter/services 单例组装与同进程共享：一个进程只组装一条 `CachedMarketDataAdapter` 链并向下注入（TUI `tui/services/bootstrap.py`、Web `web/deps.py`、CLI `cli.py`/`workflow/assembly.py`），需要 adapter/store 的高层服务接收注入而不是 `from_default` 另起一条链——双实例各持节流与来源标注状态，互相不可见；强制拉新走 `reset_fetch_throttle(key)`，来源标签走 `source_snapshot()` 快照，不直改实例私有字段
 - 新增 agent 工具：在 `agent/tools/` 对应域模块（quote/sector/flows/bars/holdings/intel/alerts/memory/themes）的 `DEFS` 与 `HANDLERS` 各加一项，`registry.py` 自动聚合（import 时校验两边名字一致），无需改注册表
 - 拉新失败保留旧数据（数据库是唯一真相源）
 - 新增模块在 `db_paths.py` 里定义数据库路径，不要硬编码

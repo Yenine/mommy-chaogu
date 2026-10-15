@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TypedDict, cast
 
-from mommy_chaogu.market_data import Bar, OrderBook
+from mommy_chaogu.flows.cumulative import latest_money_flow
+from mommy_chaogu.market_data import Bar, MoneyFlow, OrderBook
+from mommy_chaogu.market_data.time_utils import market_trade_date
 from mommy_chaogu.monitor import Snapshot, SnapshotRow
 from mommy_chaogu.portfolio import PortfolioStore
 from mommy_chaogu.portfolio.models import Position, PositionAdjustment
@@ -22,6 +25,10 @@ from mommy_chaogu.watchlist.models import Group, StockEntry
 from mommy_chaogu.web.schemas import (
     AdjustmentOut,
     BarOut,
+    FlowCumulativeOut,
+    FlowItemOut,
+    HistoryFlowItemOut,
+    HistoryFlowOut,
     OrderBookLevelOut,
     OrderBookOut,
     PositionDetailOut,
@@ -29,6 +36,7 @@ from mommy_chaogu.web.schemas import (
     QuoteOut,
     SignalOut,
     SnapshotOut,
+    TodayFlowOut,
     WatchlistGroupOut,
     WatchlistStockOut,
 )
@@ -90,8 +98,12 @@ def snapshot_to_out(snapshot: Snapshot) -> SnapshotOut:
 
 def bar_to_out(bar: Bar) -> BarOut:
     """Bar → BarOut（adapter 层已统一为 market_data.types.Bar）。"""
+    trade_date = market_trade_date(bar.timestamp, bar.code)
     return BarOut(
         timestamp=bar.timestamp,
+        trade_date=trade_date,
+        adjustment=bar.adjustment.value,
+        currency=bar.turnover.currency,
         open=bar.open,
         high=bar.high,
         low=bar.low,
@@ -109,6 +121,74 @@ def orderbook_to_out(code: str, ob: OrderBook) -> OrderBookOut:
         timestamp=ob.timestamp,
         bids=bids,
         asks=asks,
+    )
+
+
+# ---------- Money Flow mappers ----------
+
+
+def _flow_item_to_out(f: MoneyFlow) -> FlowItemOut:
+    """MoneyFlow → FlowItemOut（Decimal 保留原值，序列化为 str）。"""
+    return FlowItemOut(
+        timestamp=f.timestamp,
+        main_net=f.main_net.amount,
+        super_net=f.super_large_net.amount if f.super_large_net else None,
+        big_net=f.large_net.amount if f.large_net else None,
+        medium_net=f.medium_net.amount if f.medium_net else None,
+        small_net=f.small_net.amount if f.small_net else None,
+        main_ratio=f.main_net_ratio,
+    )
+
+
+def today_flow_to_out(flows: Sequence[MoneyFlow]) -> TodayFlowOut:
+    """当日资金流 → TodayFlowOut。
+
+    当日累计 = 序列末条（每日累计取末条契约，flows/cumulative）；
+    末条缺的分项按 0 展示（与旧 dict 路径的 ``or "0"`` 同口径）。
+    """
+    items = [_flow_item_to_out(f) for f in flows]
+    last = latest_money_flow(flows)
+    row = _flow_item_to_out(last) if last is not None else None
+    zero = Decimal("0")
+    return TodayFlowOut(
+        items=items,
+        cumulative=FlowCumulativeOut(
+            main_net=row.main_net if row is not None else zero,
+            super_net=(row.super_net if row is not None else None) or zero,
+            big_net=(row.big_net if row is not None else None) or zero,
+            medium_net=(row.medium_net if row is not None else None) or zero,
+            small_net=(row.small_net if row is not None else None) or zero,
+        ),
+    )
+
+
+def history_flow_to_out(flows: Sequence[MoneyFlow], days: int) -> HistoryFlowOut:
+    """历史资金流 → HistoryFlowOut（整段累计 = 逐日求和，缺值跳过）。"""
+    items = [
+        HistoryFlowItemOut(
+            **_flow_item_to_out(f).model_dump(),
+            date=f.timestamp.strftime("%Y-%m-%d"),
+        )
+        for f in flows
+    ]
+    zero = Decimal("0")
+    main_total = zero
+    totals: dict[str, Decimal] = {
+        "super_net": zero,
+        "big_net": zero,
+        "medium_net": zero,
+        "small_net": zero,
+    }
+    for item in items:
+        main_total += item.main_net
+        for key in totals:
+            amount = getattr(item, key)
+            if amount is not None:
+                totals[key] += amount
+    return HistoryFlowOut(
+        items=items,
+        cumulative=FlowCumulativeOut(main_net=main_total, **totals),
+        days=days,
     )
 
 

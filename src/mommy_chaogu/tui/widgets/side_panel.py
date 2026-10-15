@@ -25,7 +25,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from rich.cells import cell_len
 from rich.text import Text
@@ -36,6 +35,7 @@ from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Static
 
+from mommy_chaogu.market_data.time_utils import TZ_BEIJING
 from mommy_chaogu.tui.services import images
 from mommy_chaogu.tui.services.colors import color, current_theme
 from mommy_chaogu.tui.services.formatting import format_elapsed
@@ -45,12 +45,11 @@ SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _TICK_S = 0.15
 _POP_S = 0.35
 _MAX_DETAIL_LINES = 10
-# 与顶栏时钟同一时区（A 股交易时间），避免顶栏 10:12、时间线 02:12 的错位
-_SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _now() -> datetime:
-    return datetime.now(_SHANGHAI)
+    # 与顶栏时钟同一时区（A 股交易时间），避免顶栏 10:12、时间线 02:12 的错位
+    return datetime.now(TZ_BEIJING)
 
 
 # 时间线最多保留的轮次（更早的轮次连同行一起移除，长会话不无限增长）

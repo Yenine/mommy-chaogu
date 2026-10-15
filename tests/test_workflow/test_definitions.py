@@ -392,13 +392,14 @@ class TestStockClosedLoopDefinition:
         assert signals == ["high_20_breakout", "price_above_ma20"]
 
     def test_summary_template_covers_four_sections(self) -> None:
-        """汇总模板覆盖四段结构并带「未复权口径」与不产假信号的要求。"""
+        """汇总模板覆盖四段结构并带实际复权口径限制与不产假信号的要求。"""
         wf = get_default_registry().get("stock_closed_loop")
         assert wf is not None
         assert wf.summary_template is not None
         for section in ("技术面发现", "信息面解释", "基本面持续性", "技术面执行"):
             assert section in wf.summary_template
-        assert "未复权" in wf.summary_template
+        assert "实际复权口径" in wf.summary_template
+        assert "未核验" in wf.summary_template
         assert "不产出假信号" in wf.summary_template
 
     def test_end_to_end_offline(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -439,7 +440,7 @@ class TestStockClosedLoopDefinition:
         assert breakout["evidence"][0]["high_20"] == "1836"
         assert breakout["evidence"][0]["close"] == "1829"
         assert breakout["evidence"][0]["bars_used"] == 30
-        assert "未复权" in breakout["note"]
+        assert "实际复权口径" in breakout["note"]
 
         ma20 = result.steps[2].data
         assert ma20["count"] == 1

@@ -1,8 +1,8 @@
-"""/api/quotes 路由：实时报价 + K 线 + 盘口。"""
+"""/api/quotes 路由：实时报价 + K 线 + 盘口 + 资金流。"""
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -13,14 +13,18 @@ from mommy_chaogu.web.deps import get_adapter
 from mommy_chaogu.web.mappers import (
     _quote_to_out,
     bar_to_out,
+    history_flow_to_out,
     orderbook_to_out,
     snapshot_to_out,
+    today_flow_to_out,
 )
 from mommy_chaogu.web.schemas import (
     BarOut,
+    HistoryFlowOut,
     OrderBookOut,
     QuoteOut,
     SnapshotOut,
+    TodayFlowOut,
 )
 
 router = APIRouter(prefix="/api/quotes", tags=["quotes"])
@@ -75,6 +79,16 @@ def get_bars(
         raise HTTPException(status_code=503, detail="当前没有可用 K 线数据") from exc
     if not bars:
         raise HTTPException(status_code=503, detail="当前没有可用 K 线数据")
+    adjustments = {bar.adjustment.value for bar in bars}
+    currencies = {bar.turnover.currency for bar in bars}
+    if len(adjustments) > 1 or len(currencies) > 1:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"拒绝混合 K 线口径：复权={sorted(adjustments)}，"
+                f"成交额币种={sorted(currencies)}；请按单一口径重试"
+            ),
+        )
     return [bar_to_out(b) for b in bars]
 
 
@@ -90,82 +104,41 @@ def get_orderbook(
     return orderbook_to_out(code, ob)
 
 
-@router.get("/{code}/money_flow/today")
+@router.get("/{code}/money_flow/today", response_model=TodayFlowOut)
 def get_today_money_flow(
     code: str,
     adapter: Annotated[MarketDataAdapter, Depends(get_adapter)],
-) -> dict[str, Any]:
+) -> TodayFlowOut:
     """当日资金流（含累计汇总）。
 
     注意：efinance get_today_bill 返回的每条数据是到该时刻的**累计值**，
     不是增量。最后一条即为当日全天累计。
     """
-    flows = adapter.get_today_money_flow(code)
-    items = [
-        {
-            "timestamp": f.timestamp.isoformat(),
-            "main_net": str(f.main_net.amount),
-            "super_net": str(f.super_large_net.amount) if f.super_large_net else None,
-            "big_net": str(f.large_net.amount) if f.large_net else None,
-            "medium_net": str(f.medium_net.amount) if f.medium_net else None,
-            "small_net": str(f.small_net.amount) if f.small_net else None,
-            "main_ratio": str(f.main_net_ratio) if f.main_net_ratio is not None else None,
-        }
-        for f in flows
-    ]
-    # 当日累计 = 最后一条（已经是累计值）
-    cumulative = items[-1] if items else {}
-    return {
-        "items": items,
-        "cumulative": {
-            "main_net": cumulative.get("main_net", "0"),
-            "super_net": cumulative.get("super_net") or "0",
-            "big_net": cumulative.get("big_net") or "0",
-            "medium_net": cumulative.get("medium_net") or "0",
-            "small_net": cumulative.get("small_net") or "0",
-        },
-    }
+    try:
+        flows = adapter.get_today_money_flow(code)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="当日资金流不可用") from exc
+    if not flows:
+        raise HTTPException(status_code=503, detail="当日资金流不可用（上游无数据或请求失败）")
+    return today_flow_to_out(flows)
 
 
-@router.get("/{code}/money_flow/history")
+@router.get("/{code}/money_flow/history", response_model=HistoryFlowOut)
 def get_history_money_flow(
     code: str,
     adapter: Annotated[MarketDataAdapter, Depends(get_adapter)],
     days: Annotated[int, Query(ge=1, le=365)] = 30,
-) -> dict[str, Any]:
+) -> HistoryFlowOut:
     """历史资金流（每日一条 + 累计汇总）。
 
     返回：
     - items: 每日资金流列表（按日期升序）
     - cumulative: 整个时间段累计
     """
-    flows = adapter.get_history_money_flow(code, days=days)
-    items = [
-        {
-            "timestamp": f.timestamp.isoformat(),
-            "date": f.timestamp.strftime("%Y-%m-%d"),
-            "main_net": str(f.main_net.amount),
-            "super_net": str(f.super_large_net.amount) if f.super_large_net else None,
-            "big_net": str(f.large_net.amount) if f.large_net else None,
-            "medium_net": str(f.medium_net.amount) if f.medium_net else None,
-            "small_net": str(f.small_net.amount) if f.small_net else None,
-            "main_ratio": str(f.main_net_ratio) if f.main_net_ratio is not None else None,
-        }
-        for f in flows
-    ]
-    cumulative = _cumulative_from_items(items)
-    return {"items": items, "cumulative": cumulative, "days": days}
-
-
-def _cumulative_from_items(items: list[dict[str, Any]]) -> dict[str, str]:
-    """从资金流列表算累计。"""
-    from decimal import Decimal
-
-    fields = ["main_net", "super_net", "big_net", "medium_net", "small_net"]
-    totals: dict[str, Decimal] = {f: Decimal("0") for f in fields}
-    for item in items:
-        for f in fields:
-            v = item.get(f)
-            if v is not None:
-                totals[f] += Decimal(v)
-    return {f: str(totals[f]) for f in fields}
+    try:
+        flows = adapter.get_history_money_flow(code, days=days)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="历史资金流不可用") from exc
+    if not flows:
+        raise HTTPException(status_code=503, detail="历史资金流不可用（上游无数据或请求失败）")
+    return history_flow_to_out(flows, days)

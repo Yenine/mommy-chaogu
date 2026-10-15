@@ -207,9 +207,47 @@ def test_mcap_approximation_flagged_in_caveats(engine: BacktestEngine, store: Ca
 
     result = engine.run([code], "2026-06-01", "2026-06-05", hold_days=3)
     assert result.mcap_as_of  # 报价缓存的日期（写入刚发生，即今天）
-    assert len(result.caveats) == 1
-    assert "前视" in result.caveats[0]
-    assert result.mcap_as_of in result.caveats[0]
+    assert len(result.caveats) == 4
+    assert any("探索性信号收益观察" in caveat for caveat in result.caveats)
+    assert any("前视" in caveat and result.mcap_as_of in caveat for caveat in result.caveats)
+    # P5：回测与实盘同用「每日末条累计」口径必须显式告知用户
+    assert any("每日末条累计" in caveat for caveat in result.caveats)
+
+
+def test_load_code_data_uses_beijing_trade_date_for_utc_midnight_bar(
+    engine: BacktestEngine, store: CacheStore
+) -> None:
+    """UTC 前一日 16:00 的 A 股日 K 必须归入北京次日。"""
+    code = "600519"
+    store.set_quote(code, _make_quote(code))
+    store.set_bar(
+        code,
+        "1d",
+        "forward",
+        "2026-07-02",
+        {
+            **_make_bar(code, "2026-07-02", "100"),
+            "timestamp": "2026-07-01T16:00:00+00:00",
+        },
+    )
+    store.set_bar(
+        code,
+        "1d",
+        "forward",
+        "2026-07-03",
+        {
+            **_make_bar(code, "2026-07-03", "200"),
+            "timestamp": "2026-07-02T16:00:00+00:00",
+        },
+    )
+    store.set_money_flow_history(code, "2026-07-02", _make_flows(code, "2026-07-02", 1_000_000_000))
+
+    loaded = engine._load_code_data(code, "2026-07-02", "2026-07-03")
+
+    assert loaded is not None
+    assert loaded["bar_by_date"]["2026-07-02"]["close"] == "100"
+    assert loaded["bar_by_date"]["2026-07-03"]["close"] == "200"
+    assert "2026-07-02" in loaded["flow_by_date"]
 
 
 def test_win_rate_calculation(engine: BacktestEngine, store: CacheStore):

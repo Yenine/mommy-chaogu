@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import text
 from sqlalchemy.engine import CursorResult, Engine
@@ -23,6 +22,7 @@ from mommy_chaogu.cache.schema import SCHEMA_SQL
 from mommy_chaogu.cache.serializer import quote_from_dict, quote_to_dict
 from mommy_chaogu.db import EngineOwner, create_sqlite_engine
 from mommy_chaogu.market_data.adapter import MarketDataAdapter
+from mommy_chaogu.market_data.time_utils import beijing_trade_date
 from mommy_chaogu.market_data.types import AdjustmentType, Bar, BarInterval, MoneyFlow, Quote
 
 # 分钟周期集合：这些 interval 的 bar_cache 行按「方案 A」把同日整段序列
@@ -39,8 +39,7 @@ _MINUTE_INTERVALS = frozenset(
 )
 
 # K 线交易日历：分钟 K 时间戳是 aware UTC，落库 trade_date 必须按北京时区取
-# （与 cache/adapter._bar_trade_date 同语义）。
-_TZ_BEIJING = ZoneInfo("Asia/Shanghai")
+# （单一真相源 market_data/time_utils.beijing_trade_date，与 cache/adapter 同语义）。
 
 
 def is_minute_interval(interval: str) -> bool:
@@ -48,12 +47,20 @@ def is_minute_interval(interval: str) -> bool:
     return interval in _MINUTE_INTERVALS
 
 
-def _beijing_trade_date(ts: datetime) -> str:
-    """K 线时间戳 → 北京时区交易日字符串（YYYY-MM-DD）。"""
-    if ts.tzinfo is None:
-        # 防御：naive 视为北京墙时间（与 cache/adapter 的历史语义一致）
-        ts = ts.replace(tzinfo=_TZ_BEIJING)
-    return ts.astimezone(_TZ_BEIJING).strftime("%Y-%m-%d")
+def _bar_dict_trade_date(bar: dict[str, Any]) -> str | None:
+    """bar_json 内单根 bar 的真实北京交易日（由 timestamp 反推）。
+
+    历史脏键容错的共用工具：落键 Bug 修复前写入的行，trade_date 键可能比
+    bar 真实交易日早一天，判断一律以 bar 自身 timestamp 为准。解析失败返回
+    ``None``，由调用方决定是否回退到行键。
+    """
+    raw = bar.get("timestamp")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return beijing_trade_date(datetime.fromisoformat(raw))
+    except ValueError:
+        return None
 
 
 def _bar_to_dict(bar: Bar) -> dict[str, Any]:
@@ -260,6 +267,14 @@ class CacheStore(EngineOwner):
 
         分钟周期：每行的 bar_json 是同日整段序列的打包 list，读回时展开
         （兼容存量坍缩行的 dict 形态，按单根并入）；日/周/月线行为不变。
+
+        历史脏键读侧容错（P1）：日线回填修复北京交易日落键之前写入的行，
+        trade_date 键可能比 bar 真实交易日早一天（实测北京 07-02 落 07-01
+        键、周一 bar 落周日键）。按「不迁移、不改写任何既有数据库行」的
+        约束，这里一律用 bar_json 内 timestamp 反推真实北京交易日做区间
+        过滤、排序与去重——同 timestamp 出现在多行（脏键行 + 修复后正确键
+        行并存）时保留 fetched_at 最新的一行；脏行原样留在库里，后续被
+        正确键行自然覆盖语义（拉新成功 → 覆盖旧数据）。
         """
         expand_packs = is_minute_interval(interval)
         with self.session() as s:
@@ -279,18 +294,31 @@ class CacheStore(EngineOwner):
             ).all()
             if not rows:
                 return None
-            out: list[dict[str, Any]] = []
-            for trade_date, bar_json, _fetched in rows:
-                if start_date and trade_date < start_date:
-                    continue
-                if end_date and trade_date > end_date:
-                    continue
+            # timestamp → (fetched_at, bar)：跨行去重按数据新旧决胜
+            merged: dict[str, tuple[datetime, dict[str, Any]]] = {}
+            for row_key, bar_json, fetched in rows:
                 parsed = json.loads(bar_json)
-                if expand_packs and isinstance(parsed, list):
-                    out.extend(item for item in parsed if isinstance(item, dict))
-                else:
-                    out.append(parsed)
-            return out
+                items: list[Any] = (
+                    parsed if (expand_packs and isinstance(parsed, list)) else [parsed]
+                )
+                fetched_at = (
+                    fetched
+                    if isinstance(fetched, datetime)
+                    else datetime.fromisoformat(str(fetched))
+                )
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    real_date = _bar_dict_trade_date(item) or row_key
+                    if start_date and real_date < start_date:
+                        continue
+                    if end_date and real_date > end_date:
+                        continue
+                    ts_key = str(item.get("timestamp", ""))
+                    previous = merged.get(ts_key)
+                    if previous is None or fetched_at >= previous[0]:
+                        merged[ts_key] = (fetched_at, item)
+            return [merged[key][1] for key in sorted(merged)]
 
     def set_bar(
         self, code: str, interval: str, adj_type: str, trade_date: str, bar: dict[str, Any]
@@ -368,31 +396,42 @@ class CacheStore(EngineOwner):
         """读某交易日的分钟打包行 → {bar timestamp: bar dict}。
 
         兼容三种形态：打包 list、存量坍缩 dict、无行（空 dict）。
+
+        合并判断的脏键容错（P1）：落键 Bug 修复前写入的打包行，行键可能比
+        bar 真实交易日早一天；合并时按 bar_json 内 timestamp 反推真实交易
+        日匹配，使同一交易日的早段不被错误行键隔断（部分日写入仍不丢段）。
+        脏行本身不迁移、不改写——读取侧由 get_bars 按 timestamp 去重兜底。
+        timestamp 不可解析的 bar 只有行键恰好等于目标交易日时才并入（保留
+        既有坍缩行兼容语义，且不会凭空猜日期）。
         """
         with self.session() as s:
-            row = s.execute(
+            rows = s.execute(
                 text("""
-                    SELECT bar_json FROM bar_cache
+                    SELECT trade_date, bar_json FROM bar_cache
                     WHERE code = :code AND interval = :interval
-                      AND adj_type = :adj_type AND trade_date = :date
+                      AND adj_type = :adj_type
                 """),
                 {
                     "code": code,
                     "interval": interval,
                     "adj_type": adj_type,
-                    "date": trade_date,
                 },
-            ).first()
-        if row is None:
-            return {}
-        parsed = json.loads(row[0])
-        if isinstance(parsed, list):
-            return {
-                str(item.get("timestamp", "")): item for item in parsed if isinstance(item, dict)
-            }
-        if isinstance(parsed, dict):
-            return {str(parsed.get("timestamp", "")): parsed}
-        return {}
+            ).all()
+        pack: dict[str, dict[str, Any]] = {}
+        for row_key, bar_json in rows:
+            parsed = json.loads(bar_json)
+            items: list[Any] = parsed if isinstance(parsed, list) else [parsed]
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                real_date = _bar_dict_trade_date(item)
+                if real_date is not None:
+                    if real_date != trade_date:
+                        continue
+                elif row_key != trade_date:
+                    continue
+                pack[str(item.get("timestamp", ""))] = item
+        return pack
 
     def list_cached_bar_codes(self, code_prefix: str, interval: str, adj_type: str) -> list[str]:
         """列出 bar_cache 中已有 K 线缓存的代码（前缀过滤，DISTINCT 升序，只读）。
@@ -453,7 +492,7 @@ class CacheStore(EngineOwner):
     ) -> None:
         """写入/覆盖当日资金流。``trade_date`` 缺省按北京当前交易日。"""
         if trade_date is None:
-            trade_date = _beijing_trade_date(_utcnow())
+            trade_date = beijing_trade_date(_utcnow())
         flows_json = json.dumps(flows, ensure_ascii=False)
         with self.session() as s:
             s.execute(
@@ -557,7 +596,7 @@ class CacheStore(EngineOwner):
             # 的东财行分键存放互不覆盖；读取侧并集见 cache/adapter.get_bars。
             by_day: dict[tuple[str, str], list[dict[str, Any]]] = {}
             for bar in bars:
-                group = (bar.adjustment.value, _beijing_trade_date(bar.timestamp))
+                group = (bar.adjustment.value, beijing_trade_date(bar.timestamp))
                 by_day.setdefault(group, []).append(_bar_to_dict(bar))
             for (bar_adj, trade_date), day_bars in sorted(by_day.items()):
                 try:
@@ -568,7 +607,11 @@ class CacheStore(EngineOwner):
         else:
             for bar in bars:
                 try:
-                    trade_date = bar.timestamp.strftime("%Y-%m-%d")
+                    # 落键按北京交易日取（P1 修复）：aware UTC 时间戳直接
+                    # strftime 会把北京次日/周一/节后首日落成前一个自然日
+                    # 的键（实测北京 07-02 落 07-01 键、周一 bar 落周日键），
+                    # 与分钟分支及 cache/adapter 的落键语义对齐。
+                    trade_date = beijing_trade_date(bar.timestamp)
                     self.set_bar(code, interval_str, adj_str, trade_date, _bar_to_dict(bar))
                     result["bars_written"] += 1
                 except Exception as e:

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -21,7 +21,7 @@ def _make_flow(code: str) -> MoneyFlow:
     return MoneyFlow(
         code=code,
         name=f"股{code}",
-        timestamp=datetime(2026, 7, 18, 15, 0, 0),
+        timestamp=datetime(2026, 7, 18, 15, 0, 0, tzinfo=UTC),
         main_net=Money.from_yuan("1000000"),
         small_net=Money.from_yuan("-100000"),
         medium_net=Money.from_yuan("-200000"),
@@ -116,3 +116,49 @@ class TestCodesBatch:
         ctx = _ctx_with_flows(["600519"])
         result = HANDLERS["get_money_flow_today"](ctx, {})
         assert "error" in json.loads(result)
+
+
+class TestDataDateAnnotation:
+    """当日资金流输出自带 trade_date / data_source（P3 数据日期契约）。"""
+
+    def test_single_code_annotates_trade_date_and_source(self) -> None:
+        adapter = MagicMock()
+        adapter.get_today_money_flow.side_effect = lambda code: [_make_flow(code)]
+        adapter.last_source_trade_date = "2026-07-18"
+        adapter.last_source = "cache"
+        ctx = ToolContext(adapter=adapter)
+        data = json.loads(HANDLERS["get_money_flow_today"](ctx, {"code": "600519"}))
+        assert data["trade_date"] == "2026-07-18"
+        assert data["data_source"] == "cache"
+        assert data["main_net"] == 1000000.0
+
+    def test_codes_batch_annotates_per_code(self) -> None:
+        adapter = MagicMock()
+        adapter.get_today_money_flow.side_effect = lambda code: [_make_flow(code)]
+        adapter.last_source_trade_date = "2026-07-17"
+        adapter.last_source = "stale_cache"
+        ctx = ToolContext(adapter=adapter)
+        data = json.loads(HANDLERS["get_money_flow_today"](ctx, {"codes": ["600519", "000858"]}))
+        for code in ("600519", "000858"):
+            assert data["results"][code]["trade_date"] == "2026-07-17"
+            assert data["results"][code]["data_source"] == "stale_cache"
+
+    def test_bare_adapter_degrades_to_none(self) -> None:
+        """裸 adapter（无 last_source* 属性）：标注 None，数值语义不变。"""
+
+        class BareAdapter:
+            def get_today_money_flow(self, code: str) -> list[MoneyFlow]:
+                return [_make_flow(code)]
+
+        ctx = ToolContext(adapter=BareAdapter())  # type: ignore[arg-type]
+        data = json.loads(HANDLERS["get_money_flow_today"](ctx, {"code": "600519"}))
+        assert data["trade_date"] is None
+        assert data["data_source"] is None
+        assert data["main_net"] == 1000000.0
+
+    def test_mock_default_attrs_degrade_to_none(self) -> None:
+        """MagicMock 未显式设置 last_source*（返回 Mock 而非 str）：标注 None。"""
+        ctx = _ctx_with_flows(["600519"])
+        data = json.loads(HANDLERS["get_money_flow_today"](ctx, {"code": "600519"}))
+        assert data["trade_date"] is None
+        assert data["data_source"] is None
