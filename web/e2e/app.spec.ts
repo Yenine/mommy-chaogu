@@ -101,7 +101,7 @@ test('/flows：资金流上游失败（503）渲染可见错误行，不渲染 0
   await page.goto('/')
   await ask(page, '/flows 600519')
   const log = page.getByTestId('chat-log')
-  await expect(log).toContainText('资金流：行情源暂时不可用，稍后重试')
+  await expect(log).toContainText('资金流 600519：行情源暂时不可用，稍后重试')
   await expect(log.locator('table')).toHaveCount(0)
   await expect(log).not.toContainText('0.00亿')
 })
